@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Engineering RAG — Admin</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3a;
+    --text: #e1e4ed; --muted: #8b8fa3; --accent: #6c8cff;
+    --accent-hover: #8ba3ff; --danger: #ff6b6b; --success: #51cf66;
+    --radius: 8px; --font: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: var(--font); background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.6; }
+
+  /* Layout */
+  .container { max-width: 1100px; margin: 0 auto; padding: 24px; }
+  header { border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; }
+  header h1 { font-size: 18px; font-weight: 600; }
+  header .status { font-size: 12px; color: var(--muted); }
+  .tabs { display: flex; gap: 4px; margin-bottom: 24px; }
+  .tab { padding: 8px 16px; background: transparent; border: 1px solid var(--border); color: var(--muted); cursor: pointer; font-family: var(--font); font-size: 13px; border-radius: var(--radius); transition: all 0.15s; }
+  .tab:hover { color: var(--text); border-color: var(--muted); }
+  .tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  /* Forms */
+  .form-row { display: flex; gap: 8px; margin-bottom: 16px; align-items: flex-end; }
+  .form-group { display: flex; flex-direction: column; gap: 4px; }
+  .form-group.grow { flex: 1; }
+  label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  input, select, textarea { background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: var(--radius); font-family: var(--font); font-size: 13px; outline: none; }
+  input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 60px; }
+
+  /* Buttons */
+  .btn { padding: 8px 16px; border: none; border-radius: var(--radius); cursor: pointer; font-family: var(--font); font-size: 13px; font-weight: 500; transition: all 0.15s; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); padding: 4px 10px; font-size: 12px; }
+  .btn-danger:hover { background: var(--danger); color: #fff; }
+  .btn-sm { padding: 4px 10px; font-size: 12px; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+  th { text-align: left; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  tr:hover td { background: var(--surface); }
+  .clickable { cursor: pointer; }
+  .clickable:hover td { color: var(--accent); }
+
+  /* Cards */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; margin-bottom: 16px; }
+  .card h3 { font-size: 14px; margin-bottom: 12px; }
+
+  /* Results */
+  .result-item { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; margin-bottom: 8px; }
+  .result-meta { font-size: 11px; color: var(--muted); margin-bottom: 6px; display: flex; gap: 16px; flex-wrap: wrap; }
+  .result-meta span { display: inline-flex; align-items: center; gap: 4px; }
+  .result-text { font-size: 13px; white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow-y: auto; }
+  .score { color: var(--accent); font-weight: 600; }
+  .badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; text-transform: uppercase; }
+  .badge-table { background: #2d3a5e; color: #8ba3ff; }
+  .badge-ocr { background: #3a2d2d; color: #ff8b8b; }
+
+  /* Upload */
+  .upload-area { border: 2px dashed var(--border); border-radius: var(--radius); padding: 32px; text-align: center; color: var(--muted); cursor: pointer; transition: all 0.15s; }
+  .upload-area:hover, .upload-area.dragover { border-color: var(--accent); color: var(--accent); }
+  .upload-area input { display: none; }
+
+  /* Alerts */
+  .alert { padding: 10px 14px; border-radius: var(--radius); margin-bottom: 16px; font-size: 13px; }
+  .alert-error { background: #2d1f1f; border: 1px solid #5c2323; color: var(--danger); }
+  .alert-success { background: #1f2d1f; border: 1px solid #235c23; color: var(--success); }
+
+  /* Spinner */
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading { color: var(--muted); }
+
+  /* Breadcrumb */
+  .breadcrumb { font-size: 12px; color: var(--muted); margin-bottom: 16px; }
+  .breadcrumb a { color: var(--accent); text-decoration: none; cursor: pointer; }
+  .breadcrumb a:hover { text-decoration: underline; }
+
+  /* Empty state */
+  .empty { text-align: center; padding: 48px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>Engineering RAG</h1>
+    <div class="status" id="status">connecting...</div>
+  </header>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="folders">Folders</button>
+    <button class="tab" data-tab="documents">Documents</button>
+    <button class="tab" data-tab="ingest">Ingest</button>
+    <button class="tab" data-tab="query">Query</button>
+  </div>
+
+  <div id="alert"></div>
+
+  <!-- Folders Panel -->
+  <div class="panel active" id="panel-folders">
+    <div class="card">
+      <h3>Create Folder</h3>
+      <div class="form-row">
+        <div class="form-group grow">
+          <label>Name</label>
+          <input type="text" id="folder-name" placeholder="Project 269 -- BPCL Kochi">
+        </div>
+        <div class="form-group grow">
+          <label>Description</label>
+          <input type="text" id="folder-desc" placeholder="Optional description">
+        </div>
+        <div class="form-group">
+          <label>Tags (comma-separated)</label>
+          <input type="text" id="folder-tags" placeholder="active, piping">
+        </div>
+        <button class="btn btn-primary" onclick="createFolder()">Create</button>
+      </div>
+    </div>
+    <div id="folders-list"></div>
+  </div>
+
+  <!-- Documents Panel -->
+  <div class="panel" id="panel-documents">
+    <div class="breadcrumb" id="doc-breadcrumb">Select a folder from the Folders tab</div>
+    <div id="documents-list"></div>
+  </div>
+
+  <!-- Ingest Panel -->
+  <div class="panel" id="panel-ingest">
+    <div class="card">
+      <h3>Ingest Document</h3>
+      <div class="form-row">
+        <div class="form-group grow">
+          <label>Folder</label>
+          <select id="ingest-folder"></select>
+        </div>
+      </div>
+      <div class="upload-area" id="upload-area" onclick="document.getElementById('file-input').click()">
+        <input type="file" id="file-input" accept=".pdf,.docx,.doc" onchange="handleFileSelect(this)">
+        <div id="upload-label">Drop a PDF or DOCX here, or click to browse</div>
+      </div>
+      <div style="margin-top: 12px; text-align: right;">
+        <button class="btn btn-primary" id="ingest-btn" onclick="ingestFile()" disabled>Ingest</button>
+      </div>
+    </div>
+    <div id="ingest-result"></div>
+  </div>
+
+  <!-- Query Panel -->
+  <div class="panel" id="panel-query">
+    <div class="card">
+      <h3>Raw Vector Search</h3>
+      <div class="form-row">
+        <div class="form-group grow">
+          <label>Folder</label>
+          <select id="query-folder"></select>
+        </div>
+        <div class="form-group">
+          <label>Top K</label>
+          <input type="number" id="query-topk" value="10" min="1" max="50" style="width: 70px;">
+        </div>
+        <div class="form-group">
+          <label>Filter by doc type</label>
+          <select id="query-doctype">
+            <option value="">All</option>
+            <option value="spec">Spec</option>
+            <option value="standard">Standard</option>
+            <option value="vendor_doc">Vendor Doc</option>
+            <option value="correspondence">Correspondence</option>
+            <option value="drawing">Drawing</option>
+            <option value="technical_doc">Technical Doc</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group grow">
+          <label>Query</label>
+          <input type="text" id="query-text" placeholder="minimum bend radius process piping" style="width: 100%;"
+                 onkeydown="if(event.key==='Enter')runQuery()">
+        </div>
+        <button class="btn btn-primary" onclick="runQuery()">Search</button>
+      </div>
+    </div>
+    <div id="query-results"></div>
+  </div>
+</div>
+
+<script>
+const API = '/admin/api';
+let selectedFolder = null;
+let selectedFile = null;
+
+// ── Tabs ──────────────────────────────────────────────────────────────────
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
+    if (tab.dataset.tab === 'folders') loadFolders();
+    if (tab.dataset.tab === 'ingest') loadFolderSelects();
+    if (tab.dataset.tab === 'query') loadFolderSelects();
+  });
+});
+
+// ── Alerts ────────────────────────────────────────────────────────────────
+function showAlert(msg, type = 'error') {
+  const el = document.getElementById('alert');
+  el.innerHTML = `<div class="alert alert-${type}">${msg}</div>`;
+  setTimeout(() => { el.innerHTML = ''; }, 6000);
+}
+
+// ── API helpers ───────────────────────────────────────────────────────────
+async function api(path, opts = {}) {
+  try {
+    const resp = await fetch(API + path, opts);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    return data;
+  } catch (e) {
+    showAlert(e.message);
+    throw e;
+  }
+}
+
+// ── Folders ───────────────────────────────────────────────────────────────
+async function loadFolders() {
+  const el = document.getElementById('folders-list');
+  el.innerHTML = '<div class="loading"><span class="spinner"></span>Loading folders...</div>';
+  try {
+    const data = await api('/folders');
+    if (!data.folders.length) {
+      el.innerHTML = '<div class="empty">No folders yet. Create one above.</div>';
+      return;
+    }
+    let html = '<table><thead><tr><th>Name</th><th>ID</th><th>Docs</th><th>Tags</th><th>Description</th><th></th></tr></thead><tbody>';
+    for (const f of data.folders) {
+      html += `<tr class="clickable" onclick="openFolder('${f.folder_id}', '${esc(f.name)}')">
+        <td><strong>${esc(f.name)}</strong></td>
+        <td style="color:var(--muted);font-size:12px">${f.folder_id}</td>
+        <td>${f.doc_count}</td>
+        <td style="color:var(--muted)">${(f.tags||[]).join(', ') || '--'}</td>
+        <td style="color:var(--muted)">${esc(f.description || '--')}</td>
+        <td><button class="btn btn-danger btn-sm" onclick="event.stopPropagation();deleteFolder('${f.folder_id}','${esc(f.name)}')">Delete</button></td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+    el.innerHTML = html;
+  } catch(e) {
+    el.innerHTML = '';
+  }
+}
+
+async function createFolder() {
+  const name = document.getElementById('folder-name').value.trim();
+  if (!name) { showAlert('Folder name is required'); return; }
+  const desc = document.getElementById('folder-desc').value.trim();
+  const tags = document.getElementById('folder-tags').value.split(',').map(t => t.trim()).filter(Boolean);
+  await api('/folders', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ name, description: desc, tags }),
+  });
+  document.getElementById('folder-name').value = '';
+  document.getElementById('folder-desc').value = '';
+  document.getElementById('folder-tags').value = '';
+  showAlert('Folder created', 'success');
+  loadFolders();
+}
+
+async function deleteFolder(id, name) {
+  if (!confirm(`Delete folder "${name}" and ALL its documents? This cannot be undone.`)) return;
+  await api(`/folders/${id}`, { method: 'DELETE' });
+  showAlert('Folder deleted', 'success');
+  loadFolders();
+}
+
+function openFolder(id, name) {
+  selectedFolder = { id, name };
+  document.querySelector('[data-tab="documents"]').click();
+  loadDocuments();
+}
+
+// ── Documents ─────────────────────────────────────────────────────────────
+async function loadDocuments() {
+  if (!selectedFolder) return;
+  const bc = document.getElementById('doc-breadcrumb');
+  bc.innerHTML = `<a onclick="document.querySelector('[data-tab=folders]').click()">Folders</a> / <strong>${esc(selectedFolder.name)}</strong>`;
+  const el = document.getElementById('documents-list');
+  el.innerHTML = '<div class="loading"><span class="spinner"></span>Loading documents...</div>';
+  try {
+    const data = await api(`/folders/${selectedFolder.id}/documents`);
+    if (!data.documents.length) {
+      el.innerHTML = '<div class="empty">No documents in this folder. Go to the Ingest tab to add one.</div>';
+      return;
+    }
+    let html = '<table><thead><tr><th>Document</th><th>Type</th><th>Chunks</th><th>Tables</th><th></th></tr></thead><tbody>';
+    for (const d of data.documents.sort((a,b) => a.source_file.localeCompare(b.source_file))) {
+      html += `<tr>
+        <td>${esc(d.source_file)}</td>
+        <td>${d.doc_type}</td>
+        <td>${d.chunk_count}</td>
+        <td>${d.table_count}</td>
+        <td><button class="btn btn-danger btn-sm" onclick="deleteDoc('${esc(d.source_file)}')">Delete</button></td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+    el.innerHTML = html;
+  } catch(e) {
+    el.innerHTML = '';
+  }
+}
+
+async function deleteDoc(filename) {
+  if (!confirm(`Delete "${filename}" from this folder?`)) return;
+  await api(`/folders/${selectedFolder.id}/documents/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+  showAlert('Document deleted', 'success');
+  loadDocuments();
+}
+
+// ── Ingest ────────────────────────────────────────────────────────────────
+async function loadFolderSelects() {
+  try {
+    const data = await api('/folders');
+    for (const sel of [document.getElementById('ingest-folder'), document.getElementById('query-folder')]) {
+      const prev = sel.value;
+      sel.innerHTML = data.folders.map(f => `<option value="${f.folder_id}">${esc(f.name)}</option>`).join('');
+      if (prev) sel.value = prev;
+    }
+  } catch(e) {}
+}
+
+function handleFileSelect(input) {
+  selectedFile = input.files[0];
+  document.getElementById('upload-label').textContent = selectedFile ? selectedFile.name : 'Drop a PDF or DOCX here, or click to browse';
+  document.getElementById('ingest-btn').disabled = !selectedFile;
+}
+
+// Drag and drop
+const ua = document.getElementById('upload-area');
+ua.addEventListener('dragover', e => { e.preventDefault(); ua.classList.add('dragover'); });
+ua.addEventListener('dragleave', () => ua.classList.remove('dragover'));
+ua.addEventListener('drop', e => {
+  e.preventDefault(); ua.classList.remove('dragover');
+  if (e.dataTransfer.files.length) {
+    document.getElementById('file-input').files = e.dataTransfer.files;
+    handleFileSelect(document.getElementById('file-input'));
+  }
+});
+
+async function ingestFile() {
+  if (!selectedFile) return;
+  const folderId = document.getElementById('ingest-folder').value;
+  if (!folderId) { showAlert('Select a folder first'); return; }
+
+  const btn = document.getElementById('ingest-btn');
+  const resEl = document.getElementById('ingest-result');
+  btn.disabled = true;
+  btn.textContent = 'Ingesting...';
+  resEl.innerHTML = '<div class="loading"><span class="spinner"></span>Parsing, chunking, enriching, embedding... this may take a few minutes for large documents.</div>';
+
+  try {
+    const form = new FormData();
+    form.append('file', selectedFile);
+    const resp = await fetch(`${API}/folders/${folderId}/ingest`, { method: 'POST', body: form });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'Ingest failed');
+
+    const s = data.summary;
+    resEl.innerHTML = `<div class="alert alert-success">
+      Ingested <strong>${esc(s.source_file)}</strong> into <strong>${esc(s.folder_name)}</strong><br>
+      ${s.total_chunks} chunks (${s.text_chunks} text, ${s.table_chunks} tables, ${s.ocr_chunks} OCR) | ${s.tree_nodes} tree nodes | ${s.total_time_seconds}s
+    </div>`;
+    selectedFile = null;
+    document.getElementById('file-input').value = '';
+    document.getElementById('upload-label').textContent = 'Drop a PDF or DOCX here, or click to browse';
+  } catch(e) {
+    resEl.innerHTML = `<div class="alert alert-error">${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Ingest';
+  }
+}
+
+// ── Query ─────────────────────────────────────────────────────────────────
+async function runQuery() {
+  const folder = document.getElementById('query-folder').value;
+  const query = document.getElementById('query-text').value.trim();
+  if (!folder || !query) { showAlert('Select a folder and enter a query'); return; }
+
+  const el = document.getElementById('query-results');
+  el.innerHTML = '<div class="loading"><span class="spinner"></span>Searching...</div>';
+
+  try {
+    const body = {
+      folder,
+      query,
+      top_k: parseInt(document.getElementById('query-topk').value) || 10,
+    };
+    const dt = document.getElementById('query-doctype').value;
+    if (dt) body.doc_type = dt;
+
+    const data = await api('/query', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+
+    if (!data.results.length) {
+      el.innerHTML = '<div class="empty">No results found.</div>';
+      return;
+    }
+
+    let html = '';
+    data.results.forEach((r, i) => {
+      const headings = (r.headings || []).join(' > ') || '--';
+      const pages = (r.page_numbers || []).join(', ') || '--';
+      let badges = '';
+      if (r.is_table) badges += '<span class="badge badge-table">TABLE</span> ';
+      if (r.ocr_applied) badges += '<span class="badge badge-ocr">OCR</span> ';
+
+      html += `<div class="result-item">
+        <div class="result-meta">
+          <span><strong class="score">#${i+1} &middot; ${r.score}</strong></span>
+          <span>${esc(r.source_file)}</span>
+          <span>${r.doc_type}</span>
+          <span>pp. ${pages}</span>
+          ${badges}
+        </div>
+        <div class="result-meta" style="margin-bottom:8px"><span>${esc(headings)}</span></div>
+        ${r.context ? `<div style="color:var(--accent);font-size:12px;margin-bottom:6px;font-style:italic">${esc(r.context)}</div>` : ''}
+        <div class="result-text">${esc(r.text)}</div>
+      </div>`;
+    });
+    el.innerHTML = html;
+  } catch(e) {
+    el.innerHTML = '';
+  }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s || '';
+  return d.innerHTML;
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────
+(async () => {
+  try {
+    await api('/folders');
+    document.getElementById('status').textContent = 'connected';
+    document.getElementById('status').style.color = 'var(--success)';
+  } catch(e) {
+    document.getElementById('status').textContent = 'disconnected';
+    document.getElementById('status').style.color = 'var(--danger)';
+  }
+  loadFolders();
+})();
+</script>
+</body>
+</html>

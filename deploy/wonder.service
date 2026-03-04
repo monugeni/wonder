@@ -1,0 +1,19 @@
+[Unit]
+Description=Wonder MCP Server (SSE)
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=wonder
+Group=wonder
+WorkingDirectory=/btrfs/wonder
+EnvironmentFile=/btrfs/wonder/.env
+ExecStart=/btrfs/wonder/venv/bin/python src/server.py --transport sse --host 0.0.0.0 --port 8080
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
