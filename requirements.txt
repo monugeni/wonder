@@ -18,3 +18,4 @@ pydantic>=2.0.0
 tqdm>=4.66.0
 rich>=13.0.0
 loguru>=0.7.0
+tenacity>=8.2.0
