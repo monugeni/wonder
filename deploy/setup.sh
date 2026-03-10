@@ -16,7 +16,7 @@ echo "=== Wonder — Ubuntu Deployment ==="
 # 1. System packages
 echo "[1/6] Installing system packages..."
 apt-get update -qq
-apt-get install -y -qq python3 python3-venv python3-pip docker.io docker-compose-v2 > /dev/null
+apt-get install -y -qq python3 python3-venv python3-pip > /dev/null
 
 # 2. Create app user
 echo "[2/6] Creating app user..."
