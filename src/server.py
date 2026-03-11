@@ -58,6 +58,7 @@ from tree_retriever import deep_query as _deep_query
 from tree_store import (
     delete_all_trees,
     delete_tree,
+    get_doc_summary,
     get_node_by_id,
     list_trees,
     load_tree,
@@ -594,16 +595,13 @@ async def _handle_list_documents(arguments: dict) -> CallToolResult:
                 )]
             )
 
-        lines = [
-            f"Folder: {folder['name']}  ({folder['folder_id']})",
-            f"{'Document':<50} {'Type':<15} {'Chunks':>7} {'Tables':>7}",
-            "-" * 85,
-        ]
+        lines = [f"Folder: {folder['name']}  ({folder['folder_id']})", ""]
         for d in sorted(docs, key=lambda x: x["source_file"]):
-            lines.append(
-                f"{d['source_file']:<50} {d['doc_type']:<15} "
-                f"{d['chunk_count']:>7} {d['table_count']:>7}"
-            )
+            summary = get_doc_summary(folder["folder_id"], d["source_file"]) or ""
+            lines.append(f"  {d['source_file']}  [{d['doc_type']}]  ({d['chunk_count']} chunks, {d['table_count']} tables)")
+            if summary:
+                lines.append(f"    → {summary}")
+            lines.append("")
 
         return CallToolResult(content=[TextContent(type="text", text="\n".join(lines))])
     except (KeyError, ValueError) as e:

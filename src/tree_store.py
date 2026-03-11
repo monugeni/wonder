@@ -47,6 +47,18 @@ def tree_exists(folder_id: str, source_file: str) -> bool:
     return _tree_path(folder_id, source_file).exists()
 
 
+def get_doc_summary(folder_id: str, source_file: str) -> str | None:
+    """Return just the document-level summary, or None if no tree exists."""
+    path = _tree_path(folder_id, source_file)
+    if not path.exists():
+        return None
+    try:
+        tree = json.loads(path.read_text())
+        return tree.get("doc_summary")
+    except Exception:
+        return None
+
+
 def list_trees(folder_id: str) -> list[str]:
     """Return source_file names for all trees in a folder."""
     folder_dir = TREE_STORE_DIR / folder_id
@@ -123,6 +135,7 @@ def tree_summary_view(tree: dict) -> dict:
     return {
         "source_file": tree["source_file"],
         "doc_type": tree["doc_type"],
+        "doc_summary": tree.get("doc_summary", ""),
         "nodes": _strip(tree["nodes"]),
     }
 

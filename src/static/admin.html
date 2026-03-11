@@ -394,7 +394,10 @@ async function loadDocuments() {
     let html = '<table><thead><tr><th>Document</th><th>Type</th><th>Chunks</th><th>Tables</th><th></th></tr></thead><tbody>';
     for (const d of data.documents.sort((a,b) => a.source_file.localeCompare(b.source_file))) {
       html += `<tr>
-        <td>${esc(d.source_file)}</td>
+        <td>
+          <div>${esc(d.source_file)}</div>
+          ${d.doc_summary ? `<div style="font-size:11px;color:var(--muted);margin-top:2px;line-height:1.4">${esc(d.doc_summary)}</div>` : ''}
+        </td>
         <td>${d.doc_type}</td>
         <td>${d.chunk_count}</td>
         <td>${d.table_count}</td>

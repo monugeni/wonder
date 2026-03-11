@@ -63,6 +63,21 @@ Be specific: include key terms, materials, standards, limits, or conditions ment
 A reader should know from your summary alone whether this section might answer their question.
 Output only the summary, nothing else."""
 
+DOC_SUMMARY_PROMPT = """\
+You are indexing a technical/tender document for an engineering retrieval system.
+
+Filename: {source_file}
+Document type: {doc_type}
+
+The document has {section_count} sections. Here are the top-level sections:
+{sections}
+
+Write 2-3 sentences (max 80 words) describing what this document is about.
+Include: document purpose, key topics, relevant standards/codes, and the
+type of work or equipment covered. A reader should know from your summary
+whether this document is relevant to their question.
+Output only the summary, nothing else."""
+
 
 _node_lock = threading.Lock()
 _node_counter = 0
@@ -79,6 +94,29 @@ def _reset_counter():
     global _node_counter
     with _node_lock:
         _node_counter = 0
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+def _summarise_doc(source_file: str, doc_type: str, nodes: list[dict]) -> str:
+    """Generate a document-level summary from top-level section titles and summaries."""
+    section_lines = []
+    for n in nodes[:20]:  # cap to avoid oversized prompt
+        line = f"- {n['title']}"
+        if n.get("summary"):
+            line += f": {n['summary']}"
+        section_lines.append(line)
+
+    resp = _client.messages.create(
+        model=config.CONTEXT_MODEL,
+        max_tokens=150,
+        messages=[{"role": "user", "content": DOC_SUMMARY_PROMPT.format(
+            source_file=source_file,
+            doc_type=doc_type,
+            section_count=len(nodes),
+            sections="\n".join(section_lines),
+        )}],
+    )
+    return resp.content[0].text.strip()
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
@@ -424,9 +462,22 @@ def build_tree(doc, source_file: str, show_progress: bool = True,
     if show_progress:
         logger.info(f"  Tree complete: {total_nodes} nodes across {len(nodes)} top-level sections")
 
+    # Generate document-level summary from top-level sections (1 LLM call)
+    doc_type = detect_doc_type(source_file)
+    try:
+        if cancel_check:
+            cancel_check()
+        doc_summary = _summarise_doc(source_file, doc_type, nodes)
+        logger.info(f"  Doc summary: {doc_summary[:80]}...")
+    except Exception as e:
+        logger.warning(f"  Doc summary failed: {e}")
+        top_titles = ", ".join(n["title"] for n in nodes[:5])
+        doc_summary = f"{source_file} ({doc_type}): {top_titles}"
+
     return {
         "source_file": source_file,
-        "doc_type": detect_doc_type(source_file),
+        "doc_type": doc_type,
+        "doc_summary": doc_summary,
         "nodes": nodes,
     }
 

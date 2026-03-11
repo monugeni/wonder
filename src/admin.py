@@ -51,6 +51,7 @@ from progress import tracker
 from tree_store import (
     delete_all_trees,
     delete_tree,
+    get_doc_summary,
     get_node_by_id,
     list_trees,
     load_tree,
@@ -220,6 +221,9 @@ async def api_list_documents(request):
         folder_id = request.path_params["folder_id"]
         folder = get_folder(folder_id)
         docs = list_documents(folder["collection_name"])
+        # Enrich with document-level summary from tree store
+        for d in docs:
+            d["doc_summary"] = get_doc_summary(folder_id, d["source_file"]) or ""
         return JSONResponse({"folder": folder["name"], "documents": docs})
     except KeyError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
