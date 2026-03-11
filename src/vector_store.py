@@ -44,11 +44,9 @@ def _tokenize(text: str) -> list[str]:
 
 
 def _bm25_score(query_tokens: list[str], doc_tokens: list[str],
-                avg_dl: float, k1: float = 1.5, b: float = 0.75) -> float:
-    """
-    Simplified BM25 score (without IDF — uses query term frequency only).
-    Good enough for re-ranking a small candidate set from vector search.
-    """
+                avg_dl: float, idf: dict[str, float],
+                k1: float = 1.5, b: float = 0.75) -> float:
+    """BM25 score with IDF computed from the candidate set."""
     dl = len(doc_tokens)
     if dl == 0 or avg_dl == 0:
         return 0.0
@@ -59,7 +57,7 @@ def _bm25_score(query_tokens: list[str], doc_tokens: list[str],
         if tf > 0:
             numerator = tf * (k1 + 1)
             denominator = tf + k1 * (1 - b + b * (dl / avg_dl))
-            score += numerator / denominator
+            score += idf.get(qt, 1.0) * (numerator / denominator)
     return score
 
 
@@ -86,11 +84,22 @@ def _hybrid_rerank(query: str, results: list[dict], top_k: int,
         doc_tokens_list.append(_tokenize(headings + " " + text))
 
     avg_dl = sum(len(dt) for dt in doc_tokens_list) / max(len(doc_tokens_list), 1)
+    n_docs = len(doc_tokens_list)
+
+    # Compute IDF from the candidate set
+    df = Counter()
+    for dt in doc_tokens_list:
+        for token in set(dt):
+            df[token] += 1
+    idf = {}
+    for token in query_tokens:
+        n_containing = df.get(token, 0)
+        idf[token] = math.log((n_docs - n_containing + 0.5) / (n_containing + 0.5) + 1)
 
     # Compute BM25 scores
     bm25_scores = []
     for dt in doc_tokens_list:
-        bm25_scores.append(_bm25_score(query_tokens, dt, avg_dl))
+        bm25_scores.append(_bm25_score(query_tokens, dt, avg_dl, idf))
 
     # Build rankings
     vector_rank = {i: rank for rank, i in enumerate(range(len(results)))}
