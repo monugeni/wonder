@@ -232,8 +232,24 @@ def _enrich_headings_from_tree(chunks, tree):
                 best_match = sec
 
         if best_match and best_score > 5:
-            # Build improved heading: tree ancestors + chunk's own heading
-            tree_bc = best_match["breadcrumb"]
+            # Build improved heading: tree breadcrumb + nearby section titles
+            tree_bc = list(best_match["breadcrumb"])
+
+            # For content-matched pageless chunks, also include nearby tree
+            # sections on the same pages (captures parent headings like
+            # "TECHNICAL CRITERIA" that precede the matched section)
+            if not chunk.page_numbers and best_match["page_start"]:
+                matched_idx = tree_sections.index(best_match)
+                for j in range(matched_idx - 1, max(matched_idx - 5, -1), -1):
+                    nearby = tree_sections[j]
+                    if (nearby["page_start"] and nearby["page_end"]
+                            and nearby["page_start"] <= best_match["page_start"]
+                            and nearby["page_end"] >= best_match["page_start"]):
+                        # Same page range — likely a parent section
+                        for h in nearby["breadcrumb"]:
+                            if h not in tree_bc:
+                                tree_bc.insert(0, h)
+
             existing = set(h.lower().strip("*: ") for h in chunk.headings)
             # Prepend tree headings that the chunk doesn't already have
             new_headings = []

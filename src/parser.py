@@ -294,11 +294,12 @@ def _extract_chunks(doc, filename: str, doc_type: str, image_only_pages: set[int
         ))
 
     # Sort chunks by page order so tables (extracted first) are interleaved
-    # with text chunks at the correct position. Chunks without pages go last.
+    # with text chunks at the correct position. Pageless chunks go first so
+    # backward heading propagation gives them headings from page 1 content.
     def _sort_key(c):
         if c.page_numbers:
             return (min(c.page_numbers), 0 if not c.is_table else 1)
-        return (999999, 0 if not c.is_table else 1)
+        return (0, 0 if not c.is_table else 1)
     chunks.sort(key=_sort_key)
 
     # Forward heading propagation: chunks inherit from nearest preceding chunk
