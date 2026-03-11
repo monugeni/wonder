@@ -23,6 +23,7 @@ Run with:
   python src/server.py
 """
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -387,7 +388,10 @@ async def _handle_ingest(arguments: dict) -> CallToolResult:
     try:
         args = IngestDocumentInput(**arguments)
         folder = resolve_folder(args.folder)
-        summary = ingest(args.file_path, folder["folder_id"])
+        loop = asyncio.get_event_loop()
+        summary = await loop.run_in_executor(
+            None, ingest, args.file_path, folder["folder_id"]
+        )
         return CallToolResult(
             content=[TextContent(type="text", text=json.dumps(summary, indent=2))]
         )

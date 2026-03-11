@@ -324,7 +324,7 @@ def _collect_summary_tasks(nodes: list[dict], source_file: str, ancestors: list[
     return tasks
 
 
-def _summarise_tree(nodes: list[dict], source_file: str, ancestors: list[str] = [], max_workers: int = 10):
+def _summarise_tree(nodes: list[dict], source_file: str, ancestors: list[str] = [], max_workers: int = 5):
     """
     Generate summaries for all tree nodes using parallel API calls.
     """

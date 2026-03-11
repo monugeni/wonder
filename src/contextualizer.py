@@ -104,7 +104,7 @@ def build_context_sentence(chunk: ParsedChunk) -> str:
 def enrich_chunks_with_context(
     chunks: list[ParsedChunk],
     show_progress: bool = True,
-    max_workers: int = 10,
+    max_workers: int = 5,
 ) -> list[tuple[ParsedChunk, str]]:
     """
     Enrich all chunks with context sentences using parallel API calls.
