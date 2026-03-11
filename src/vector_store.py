@@ -196,9 +196,9 @@ def search(
         qmodels.Filter(must=must_conditions) if must_conditions else None
     )
 
-    results = client.search(
+    results = client.query_points(
         collection_name=collection_name,
-        query_vector=query_vector,
+        query=query_vector,
         query_filter=query_filter,
         limit=top_k,
         with_payload=True,
@@ -218,7 +218,7 @@ def search(
             "chunk_id": hit.payload.get("chunk_id", ""),
             "ocr_applied": hit.payload.get("ocr_applied", False),
         }
-        for hit in results
+        for hit in results.points
     ]
 
 
