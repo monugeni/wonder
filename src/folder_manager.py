@@ -165,6 +165,24 @@ def delete_folder(folder_id: str) -> dict:
     return folder
 
 
+def rename_folder(folder_id: str, new_name: str) -> dict:
+    """Rename a folder. Returns the updated folder record."""
+    new_name = new_name.strip()
+    if not new_name:
+        raise ValueError("Folder name cannot be empty.")
+    registry = _load_registry()
+    if folder_id not in registry:
+        raise KeyError(f"Folder '{folder_id}' not found.")
+    # Check for duplicate name
+    for fid, existing in registry.items():
+        if fid != folder_id and existing["name"].lower() == new_name.lower():
+            raise ValueError(f"A folder named '{new_name}' already exists.")
+    registry[folder_id]["name"] = new_name
+    _save_registry(registry)
+    logger.info(f"Renamed folder {folder_id} to '{new_name}'")
+    return registry[folder_id]
+
+
 def resolve_folder(folder_id_or_name: str) -> dict:
     """
     Convenience: accept either a folder_id or a folder name.

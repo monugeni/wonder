@@ -197,6 +197,21 @@ def delete_manifest(folder_id: str, source_file: str) -> bool:
     return False
 
 
+def rename_manifest(folder_id: str, old_source_file: str, new_source_file: str) -> bool:
+    """Rename a split manifest. Returns True if renamed."""
+    old_path = _manifest_path(folder_id, old_source_file)
+    if not old_path.exists():
+        return False
+    manifest = json.loads(old_path.read_text())
+    manifest["source_file"] = new_source_file
+    new_path = _manifest_path(folder_id, new_source_file)
+    new_path.write_text(json.dumps(manifest, indent=2))
+    if old_path != new_path:
+        old_path.unlink()
+    logger.debug(f"Renamed split manifest: {old_path.name} -> {new_path.name}")
+    return True
+
+
 def delete_all_manifests(folder_id: str) -> int:
     """Delete all split manifests for a folder. Returns count deleted."""
     manifest_dir = _manifest_dir(folder_id)

@@ -42,6 +42,7 @@ from folder_manager import (
     create_folder,
     delete_folder,
     list_folders,
+    rename_folder,
     resolve_folder,
     update_folder_doc_count,
 )
@@ -50,16 +51,18 @@ from pdf_split import (
     delete_all_manifests,
     delete_manifest,
     load_manifest,
+    rename_manifest,
 )
 from progress import tracker
 from tree_retriever import deep_query as _deep_query
-from tree_store import delete_all_trees, delete_tree
+from tree_store import delete_all_trees, delete_tree, rename_tree
 from vector_store import (
     create_collection,
     delete_document,
     drop_collection,
     get_table_ids,
     list_documents,
+    rename_document,
     search,
 )
 
@@ -128,6 +131,22 @@ class QueryInput(BaseModel):
     """Whether to include table chunks in results (default True)."""
 
 
+class RenameFolderInput(BaseModel):
+    folder: str
+    """Folder ID or exact folder name."""
+    new_name: str
+    """New name for the folder."""
+
+
+class RenameDocumentInput(BaseModel):
+    folder: str
+    """Folder ID or exact folder name."""
+    source_file: str
+    """Current filename of the document."""
+    new_name: str
+    """New filename for the document."""
+
+
 class CancelIngestionInput(BaseModel):
     job_id: str
     """The job ID to cancel. Use list_ingestion_jobs to find active job IDs."""
@@ -186,6 +205,12 @@ async def list_tools() -> ListToolsResult:
         ),
 
         Tool(
+            name="rename_folder",
+            description="Rename a project/tender folder. Does not affect documents or search.",
+            inputSchema=RenameFolderInput.model_json_schema(),
+        ),
+
+        Tool(
             name="ingest_document",
             description=(
                 "Parse a PDF or DOCX and index it into a specific folder. "
@@ -212,6 +237,15 @@ async def list_tools() -> ListToolsResult:
                 "Use before re-ingesting an updated version of the same document."
             ),
             inputSchema=DeleteDocumentInput.model_json_schema(),
+        ),
+
+        Tool(
+            name="rename_document",
+            description=(
+                "Rename a document within a folder. Updates metadata only — "
+                "does not re-embed or affect search quality."
+            ),
+            inputSchema=RenameDocumentInput.model_json_schema(),
         ),
 
         Tool(
@@ -267,9 +301,11 @@ async def call_tool(name: str, arguments: dict) -> CallToolResult:
         "create_folder":        _handle_create_folder,
         "list_folders":         _handle_list_folders,
         "delete_folder":        _handle_delete_folder,
+        "rename_folder":        _handle_rename_folder,
         "ingest_document":      _handle_ingest,
         "list_documents":       _handle_list_documents,
         "delete_document":      _handle_delete_document,
+        "rename_document":      _handle_rename_document,
         "query":                _handle_query,
         "deep_query":           _handle_deep_query,
         "list_ingestion_jobs":  _handle_list_jobs,
@@ -423,6 +459,28 @@ async def _handle_delete_folder(arguments: dict) -> CallToolResult:
         )
 
 
+async def _handle_rename_folder(arguments: dict) -> CallToolResult:
+    try:
+        args = RenameFolderInput(**arguments)
+        folder = resolve_folder(args.folder)
+        updated = rename_folder(folder["folder_id"], args.new_name)
+        return CallToolResult(
+            content=[TextContent(
+                type="text",
+                text=f"Folder renamed: '{folder['name']}' -> '{updated['name']}'"
+            )]
+        )
+    except (KeyError, ValueError) as e:
+        return CallToolResult(
+            content=[TextContent(type="text", text=str(e))], isError=True
+        )
+    except Exception as e:
+        logger.exception(f"rename_folder error: {e}")
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"Failed: {e}")], isError=True
+        )
+
+
 async def _handle_ingest(arguments: dict) -> CallToolResult:
     try:
         args = IngestDocumentInput(**arguments)
@@ -559,6 +617,46 @@ async def _handle_delete_document(arguments: dict) -> CallToolResult:
         )
     except Exception as e:
         logger.exception(f"delete_document error: {e}")
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"Failed: {e}")], isError=True
+        )
+
+
+async def _handle_rename_document(arguments: dict) -> CallToolResult:
+    try:
+        args = RenameDocumentInput(**arguments)
+        folder = resolve_folder(args.folder)
+        collection_name = folder["collection_name"]
+        folder_id = folder["folder_id"]
+
+        manifest = load_manifest(folder_id, args.source_file)
+        if manifest:
+            rename_manifest(folder_id, args.source_file, args.new_name)
+            return CallToolResult(
+                content=[TextContent(
+                    type="text",
+                    text=f"Renamed split document: '{args.source_file}' -> '{args.new_name}'"
+                )]
+            )
+
+        count = rename_document(collection_name, args.source_file, args.new_name)
+        rename_tree(folder_id, args.source_file, args.new_name)
+
+        return CallToolResult(
+            content=[TextContent(
+                type="text",
+                text=(
+                    f"Renamed: '{args.source_file}' -> '{args.new_name}'\n"
+                    f"{count} chunk(s) updated in folder '{folder['name']}'."
+                )
+            )]
+        )
+    except (KeyError, ValueError) as e:
+        return CallToolResult(
+            content=[TextContent(type="text", text=str(e))], isError=True
+        )
+    except Exception as e:
+        logger.exception(f"rename_document error: {e}")
         return CallToolResult(
             content=[TextContent(type="text", text=f"Failed: {e}")], isError=True
         )

@@ -33,6 +33,10 @@ class Config:
     SPLIT_MIN_DOC_PAGES: int = int(os.getenv("SPLIT_MIN_DOC_PAGES", "4"))
     """Minimum pages per split segment (prevents tiny fragments)."""
 
+    # Parallelism for LLM calls (contextualiser + tree summariser)
+    LLM_WORKERS: int = int(os.getenv("LLM_WORKERS", "20"))
+    """Max concurrent Anthropic API calls for context enrichment and tree summaries."""
+
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 

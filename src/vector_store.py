@@ -424,6 +424,36 @@ def get_table_ids(collection_name: str, source_file: str) -> list[str]:
     return list(table_ids)
 
 
+def rename_document(collection_name: str, old_source_file: str, new_source_file: str) -> int:
+    """Rename a document by updating source_file payload on all its chunks. Returns count updated."""
+    client = _get_client()
+    count = client.count(
+        collection_name=collection_name,
+        count_filter=qmodels.Filter(
+            must=[qmodels.FieldCondition(
+                key="source_file",
+                match=qmodels.MatchValue(value=old_source_file),
+            )]
+        ),
+    ).count
+    if count == 0:
+        return 0
+    client.set_payload(
+        collection_name=collection_name,
+        payload={"source_file": new_source_file},
+        points=qmodels.FilterSelector(
+            filter=qmodels.Filter(
+                must=[qmodels.FieldCondition(
+                    key="source_file",
+                    match=qmodels.MatchValue(value=old_source_file),
+                )]
+            )
+        ),
+    )
+    logger.info(f"Renamed '{old_source_file}' -> '{new_source_file}' ({count} chunks) in '{collection_name}'")
+    return count
+
+
 def delete_document(collection_name: str, source_file: str) -> int:
     """Delete all chunks for a document. Returns points deleted."""
     client = _get_client()

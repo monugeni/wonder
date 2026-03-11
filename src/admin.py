@@ -41,19 +41,21 @@ from folder_manager import (
     delete_folder,
     get_folder,
     list_folders,
+    rename_folder,
     resolve_folder,
     update_folder_doc_count,
 )
 from ingestor import IngestionCancelledError, ingest_with_split
-from pdf_split import delete_all_manifests, delete_manifest, load_manifest
+from pdf_split import delete_all_manifests, delete_manifest, load_manifest, rename_manifest
 from progress import tracker
-from tree_store import delete_all_trees, delete_tree
+from tree_store import delete_all_trees, delete_tree, rename_tree
 from vector_store import (
     create_collection,
     delete_document,
     drop_collection,
     get_table_ids,
     list_documents,
+    rename_document,
     search,
 )
 
@@ -141,6 +143,64 @@ async def api_delete_folder(request):
         delete_folder(folder_id)
 
         return JSONResponse({"status": "deleted", "folder_id": folder_id})
+    except KeyError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def api_rename_folder(request):
+    try:
+        folder_id = request.path_params["folder_id"]
+        body = await request.json()
+        new_name = body.get("name", "").strip()
+        if not new_name:
+            return JSONResponse({"error": "name is required"}, status_code=400)
+        folder = rename_folder(folder_id, new_name)
+        return JSONResponse({"folder": folder})
+    except KeyError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def api_rename_document(request):
+    try:
+        folder_id = request.path_params["folder_id"]
+        old_filename = request.path_params["filename"]
+        body = await request.json()
+        new_filename = body.get("name", "").strip()
+        if not new_filename:
+            return JSONResponse({"error": "name is required"}, status_code=400)
+
+        folder = get_folder(folder_id)
+        collection_name = folder["collection_name"]
+
+        # Check if this is a split parent — rename the manifest, not parts
+        manifest = load_manifest(folder_id, old_filename)
+        if manifest:
+            rename_manifest(folder_id, old_filename, new_filename)
+            # Rename trees for each part
+            for part in manifest["parts"]:
+                rename_tree(folder_id, part["filename"], part["filename"])
+            return JSONResponse({
+                "status": "renamed",
+                "old_name": old_filename,
+                "new_name": new_filename,
+            })
+
+        # Single document — rename in Qdrant, tree, and table artifacts
+        count = rename_document(collection_name, old_filename, new_filename)
+        rename_tree(folder_id, old_filename, new_filename)
+
+        return JSONResponse({
+            "status": "renamed",
+            "old_name": old_filename,
+            "new_name": new_filename,
+            "chunks_updated": count,
+        })
     except KeyError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
     except Exception as e:
@@ -364,7 +424,9 @@ admin_routes = [
     Route("/api/folders", api_list_folders, methods=["GET"]),
     Route("/api/folders", api_create_folder, methods=["POST"]),
     Route("/api/folders/{folder_id}", api_delete_folder, methods=["DELETE"]),
+    Route("/api/folders/{folder_id}", api_rename_folder, methods=["PATCH"]),
     Route("/api/folders/{folder_id}/documents", api_list_documents, methods=["GET"]),
+    Route("/api/folders/{folder_id}/documents/{filename:path}/rename", api_rename_document, methods=["PATCH"]),
     Route("/api/folders/{folder_id}/documents/{filename:path}", api_delete_document, methods=["DELETE"]),
     Route("/api/folders/{folder_id}/ingest", api_ingest, methods=["POST"]),
     Route("/api/jobs", api_list_jobs, methods=["GET"]),

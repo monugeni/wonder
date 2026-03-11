@@ -283,7 +283,10 @@ async function loadFolders() {
         <td>${f.doc_count}</td>
         <td style="color:var(--muted)">${(f.tags||[]).join(', ') || '--'}</td>
         <td style="color:var(--muted)">${esc(f.description || '--')}</td>
-        <td><button class="btn btn-danger btn-sm" onclick="event.stopPropagation();deleteFolder('${f.folder_id}','${esc(f.name)}')">Delete</button></td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-sm" style="border:1px solid var(--muted);color:var(--muted);margin-right:4px" onclick="event.stopPropagation();renameFolder('${f.folder_id}','${esc(f.name)}')">Rename</button>
+          <button class="btn btn-danger btn-sm" onclick="event.stopPropagation();deleteFolder('${f.folder_id}','${esc(f.name)}')">Delete</button>
+        </td>
       </tr>`;
     }
     html += '</tbody></table>';
@@ -317,6 +320,20 @@ async function deleteFolder(id, name) {
   loadFolders();
 }
 
+async function renameFolder(id, currentName) {
+  const newName = prompt('Rename folder:', currentName);
+  if (!newName || newName.trim() === currentName) return;
+  try {
+    await api(`/folders/${id}`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ name: newName.trim() }),
+    });
+    showAlert('Folder renamed', 'success');
+    loadFolders();
+  } catch(e) {}
+}
+
 function openFolder(id, name) {
   selectedFolder = { id, name };
   document.querySelector('[data-tab="documents"]').click();
@@ -343,7 +360,10 @@ async function loadDocuments() {
         <td>${d.doc_type}</td>
         <td>${d.chunk_count}</td>
         <td>${d.table_count}</td>
-        <td><button class="btn btn-danger btn-sm" onclick="deleteDoc('${esc(d.source_file)}')">Delete</button></td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-sm" style="border:1px solid var(--muted);color:var(--muted);margin-right:4px" onclick="renameDoc('${esc(d.source_file)}')">Rename</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteDoc('${esc(d.source_file)}')">Delete</button>
+        </td>
       </tr>`;
     }
     html += '</tbody></table>';
@@ -358,6 +378,20 @@ async function deleteDoc(filename) {
   await api(`/folders/${selectedFolder.id}/documents/${encodeURIComponent(filename)}`, { method: 'DELETE' });
   showAlert('Document deleted', 'success');
   loadDocuments();
+}
+
+async function renameDoc(filename) {
+  const newName = prompt('Rename document:', filename);
+  if (!newName || newName.trim() === filename) return;
+  try {
+    await api(`/folders/${selectedFolder.id}/documents/${encodeURIComponent(filename)}/rename`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ name: newName.trim() }),
+    });
+    showAlert('Document renamed', 'success');
+    loadDocuments();
+  } catch(e) {}
 }
 
 // ── Ingest ────────────────────────────────────────────────────────────────
@@ -756,6 +790,23 @@ function esc(s) {
   return d.innerHTML;
 }
 
+// ── Resume running jobs on page load ──────────────────────────────────────
+async function checkRunningJobs() {
+  try {
+    const data = await fetch(`${API}/jobs`).then(r => r.json());
+    const running = (data.jobs || []).find(j => j.status === 'running' || j.status === 'pending');
+    if (running) {
+      activeJobId = running.job_id;
+      initProgressUI(running.source_file);
+      // Switch to ingest tab to show progress
+      document.querySelector('[data-tab="ingest"]').click();
+      document.getElementById('upload-area').classList.add('disabled');
+      document.getElementById('ingest-btn').disabled = true;
+      connectSSE(running.job_id);
+    }
+  } catch(e) {}
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────
 (async () => {
   try {
@@ -767,6 +818,7 @@ function esc(s) {
     document.getElementById('status').style.color = 'var(--danger)';
   }
   loadFolders();
+  checkRunningJobs();
 })();
 </script>
 </body>

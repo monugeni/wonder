@@ -55,6 +55,21 @@ def list_trees(folder_id: str) -> list[str]:
     return [p.stem.replace(".tree", "") for p in folder_dir.glob("*.tree.json")]
 
 
+def rename_tree(folder_id: str, old_source_file: str, new_source_file: str) -> bool:
+    """Rename a tree file and update source_file inside it. Returns True if renamed."""
+    old_path = _tree_path(folder_id, old_source_file)
+    if not old_path.exists():
+        return False
+    tree = json.loads(old_path.read_text())
+    tree["source_file"] = new_source_file
+    new_path = _tree_path(folder_id, new_source_file)
+    new_path.write_text(json.dumps(tree, indent=2, ensure_ascii=False))
+    if old_path != new_path:
+        old_path.unlink()
+    logger.info(f"  Tree renamed: {old_path.name} -> {new_path.name}")
+    return True
+
+
 def delete_tree(folder_id: str, source_file: str) -> bool:
     """Delete a tree. Returns True if it existed."""
     path = _tree_path(folder_id, source_file)

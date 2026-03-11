@@ -158,7 +158,7 @@ def _build_neighbor_text(chunks: list[ParsedChunk], index: int) -> str:
 def enrich_chunks_with_context(
     chunks: list[ParsedChunk],
     show_progress: bool = True,
-    max_workers: int = 5,
+    max_workers: int = None,
     on_progress: callable = None,
     cancel_check: callable = None,
 ) -> list[tuple[ParsedChunk, str]]:
@@ -179,6 +179,9 @@ def enrich_chunks_with_context(
     Returns:
         List of (ParsedChunk, enriched_text) tuples ready for embedding
     """
+    if max_workers is None:
+        max_workers = config.LLM_WORKERS
+
     total = len(chunks)
     # Pre-allocate results list to maintain chunk order
     context_sentences = [""] * total

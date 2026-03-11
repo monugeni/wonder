@@ -325,11 +325,15 @@ def _collect_summary_tasks(nodes: list[dict], source_file: str, ancestors: list[
 
 
 def _summarise_tree(nodes: list[dict], source_file: str, ancestors: list[str] = [],
-                    max_workers: int = 5, on_progress: callable = None,
+                    max_workers: int = None, on_progress: callable = None,
                     cancel_check: callable = None):
     """
     Generate summaries for all tree nodes using parallel API calls.
     """
+    if max_workers is None:
+        from config import config
+        max_workers = config.LLM_WORKERS
+
     tasks = _collect_summary_tasks(nodes, source_file, ancestors)
     total = len(tasks)
     done_count = 0
