@@ -42,6 +42,10 @@ _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
 
 TREE_STORE_DIR = config.TABLE_STORE_DIR.parent / "trees"
 
+# Sections with content at or below this word count use the raw text as
+# the summary instead of making an LLM call — saves tokens and latency.
+SHORT_SECTION_WORD_LIMIT = 60
+
 SUMMARY_PROMPT = """\
 You are indexing a section from a technical engineering document.
 
@@ -302,11 +306,27 @@ def _breadcrumb(node: dict, ancestors: list[str]) -> str:
 
 
 def _collect_summary_tasks(nodes: list[dict], source_file: str, ancestors: list[str] = []) -> list[tuple[dict, str, str, str]]:
-    """Collect all (node, source_file, breadcrumb, content) tuples for parallel summarisation."""
+    """Collect all (node, source_file, breadcrumb, content) tuples for parallel summarisation.
+
+    Short sections (≤ SHORT_SECTION_WORD_LIMIT words) get their raw text
+    as the summary immediately — no LLM call needed.
+    """
     tasks = []
     for node in nodes:
         if node["children"]:
             tasks.extend(_collect_summary_tasks(node["children"], source_file, ancestors + [node["title"]]))
+
+        content = node["full_text"]
+
+        if not content.strip():
+            child_titles = ", ".join(c["title"] for c in node["children"][:5])
+            content = f"Section covering: {child_titles}" if child_titles else node["title"]
+
+        # Short sections: use the text itself as the summary
+        if len(content.split()) <= SHORT_SECTION_WORD_LIMIT:
+            node["summary"] = content.strip()
+            logger.debug(f"  Short section, skipped LLM: {node['title'][:60]}")
+            continue
 
         pages_str = (
             f"{node['page_start']}-{node['page_end']}"
@@ -314,12 +334,6 @@ def _collect_summary_tasks(nodes: list[dict], source_file: str, ancestors: list[
             else "unknown"
         )
         breadcrumb = _breadcrumb(node, ancestors)
-        content = node["full_text"]
-
-        if not content.strip():
-            child_titles = ", ".join(c["title"] for c in node["children"][:5])
-            content = f"Section covering: {child_titles}" if child_titles else node["title"]
-
         tasks.append((node, source_file, breadcrumb, pages_str, content))
     return tasks
 
