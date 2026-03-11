@@ -9,7 +9,7 @@ Collection lifecycle:
   create_collection(collection_name)  — on folder creation
   drop_collection(collection_name)    — on folder deletion
   upsert_chunks(collection_name, ...) — on document ingestion
-  search(collection_name, ...)        — on query
+  search(collection_name, ...)        — on query (hybrid: vector + BM25)
   list_documents(collection_name)     — per folder
   delete_document(collection_name, source_file) — per document
 
@@ -21,7 +21,10 @@ Schema per point (unchanged):
     headings, page_numbers, is_table, table_id, chunk_id, ocr_applied
 """
 
+import math
+import re
 import uuid
+from collections import Counter
 from typing import Optional
 
 from loguru import logger
@@ -31,6 +34,87 @@ from qdrant_client.http import models as qmodels
 from config import config
 from embedder import get_embedding_dimension
 from parser import ParsedChunk
+
+
+# ── BM25 scoring for hybrid search ──────────────────────────────────────────
+
+def _tokenize(text: str) -> list[str]:
+    """Simple whitespace + punctuation tokenizer with lowercasing."""
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def _bm25_score(query_tokens: list[str], doc_tokens: list[str],
+                avg_dl: float, k1: float = 1.5, b: float = 0.75) -> float:
+    """
+    Simplified BM25 score (without IDF — uses query term frequency only).
+    Good enough for re-ranking a small candidate set from vector search.
+    """
+    dl = len(doc_tokens)
+    if dl == 0 or avg_dl == 0:
+        return 0.0
+    tf_map = Counter(doc_tokens)
+    score = 0.0
+    for qt in query_tokens:
+        tf = tf_map.get(qt, 0)
+        if tf > 0:
+            numerator = tf * (k1 + 1)
+            denominator = tf + k1 * (1 - b + b * (dl / avg_dl))
+            score += numerator / denominator
+    return score
+
+
+def _hybrid_rerank(query: str, results: list[dict], top_k: int,
+                   rrf_k: int = 60) -> list[dict]:
+    """
+    Re-rank vector search results using Reciprocal Rank Fusion (RRF)
+    of vector score ranking and BM25 keyword ranking.
+
+    RRF score = 1/(k + rank_vector) + 1/(k + rank_bm25)
+    """
+    if not results:
+        return results
+
+    query_tokens = _tokenize(query)
+    if not query_tokens:
+        return results[:top_k]
+
+    # Tokenize all result texts (use enriched_text for full content)
+    doc_tokens_list = []
+    for r in results:
+        text = r.get("enriched_text", r.get("text", ""))
+        headings = " ".join(r.get("headings", []))
+        doc_tokens_list.append(_tokenize(headings + " " + text))
+
+    avg_dl = sum(len(dt) for dt in doc_tokens_list) / max(len(doc_tokens_list), 1)
+
+    # Compute BM25 scores
+    bm25_scores = []
+    for dt in doc_tokens_list:
+        bm25_scores.append(_bm25_score(query_tokens, dt, avg_dl))
+
+    # Build rankings
+    vector_rank = {i: rank for rank, i in enumerate(range(len(results)))}
+
+    bm25_order = sorted(range(len(results)), key=lambda i: -bm25_scores[i])
+    bm25_rank = {i: rank for rank, i in enumerate(bm25_order)}
+
+    # RRF fusion
+    rrf_scores = []
+    for i in range(len(results)):
+        rrf = 1.0 / (rrf_k + vector_rank[i]) + 1.0 / (rrf_k + bm25_rank[i])
+        rrf_scores.append((i, rrf))
+
+    rrf_scores.sort(key=lambda x: -x[1])
+
+    reranked = []
+    for i, rrf_score in rrf_scores[:top_k]:
+        r = dict(results[i])
+        r["rrf_score"] = round(rrf_score, 6)
+        r["bm25_rank"] = bm25_rank[i] + 1
+        r["vector_rank"] = vector_rank[i] + 1
+        reranked.append(r)
+
+    return reranked
 
 
 def _get_client() -> QdrantClient:
@@ -159,9 +243,12 @@ def search(
     source_file: Optional[str] = None,
     doc_type: Optional[str] = None,
     headings_contain: Optional[str] = None,
+    query_text: str = "",
 ) -> list[dict]:
     """
-    Semantic search within a single folder collection.
+    Hybrid search within a single folder collection.
+    Uses vector similarity for semantic matching, then re-ranks with BM25
+    keyword scoring via Reciprocal Rank Fusion (RRF).
     All results are guaranteed to come from this collection only.
     """
     client = _get_client()
@@ -196,12 +283,13 @@ def search(
         qmodels.Filter(must=must_conditions) if must_conditions else None
     )
 
-    # Fetch extra results so we can deduplicate and still return top_k
+    # Fetch a broad candidate set for hybrid re-ranking
+    fetch_limit = max(top_k * 5, 30)
     results = client.query_points(
         collection_name=collection_name,
         query=query_vector,
         query_filter=query_filter,
-        limit=top_k * 3,
+        limit=fetch_limit,
         with_payload=True,
     )
 
@@ -226,6 +314,7 @@ def search(
             "score": round(hit.score, 4),
             "text": text,
             "context": hit.payload.get("context", ""),
+            "enriched_text": hit.payload.get("enriched_text", ""),
             "source_file": hit.payload.get("source_file", ""),
             "doc_type": hit.payload.get("doc_type", ""),
             "headings": hit.payload.get("headings", []),
@@ -235,8 +324,16 @@ def search(
             "chunk_id": hit.payload.get("chunk_id", ""),
             "ocr_applied": hit.payload.get("ocr_applied", False),
         })
-        if len(deduped) >= top_k:
-            break
+
+    # Apply BM25 hybrid re-ranking if query text is provided
+    if query_text and deduped:
+        deduped = _hybrid_rerank(query_text, deduped, top_k)
+    else:
+        deduped = deduped[:top_k]
+
+    # Remove enriched_text from output (only needed for BM25 scoring)
+    for r in deduped:
+        r.pop("enriched_text", None)
 
     return deduped
 

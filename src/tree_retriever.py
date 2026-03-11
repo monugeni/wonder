@@ -124,6 +124,7 @@ def _vector_coarse_filter(
         query_vector=query_vec,
         top_k=top_k,
         doc_type=doc_type,
+        query_text=query,
     )
 
     # Deduplicate: keep the highest score per document

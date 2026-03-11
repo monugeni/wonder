@@ -219,6 +219,7 @@ async def api_query(request):
             top_k=top_k,
             source_file=source_file,
             doc_type=doc_type,
+            query_text=query_text,
         )
 
         return JSONResponse({

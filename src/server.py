@@ -510,6 +510,7 @@ async def _handle_query(arguments: dict) -> CallToolResult:
             source_file=args.source_file,
             doc_type=args.doc_type,
             headings_contain=args.headings_contain,
+            query_text=args.query,
         )
 
         if not args.include_tables:
