@@ -29,7 +29,7 @@ from typing import Optional
 import fitz  # PyMuPDF — used only for page-type detection, not for text extraction
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.base_models import InputFormat
-from docling.datamodel.pipeline_options import PdfPipelineOptions, EasyOcrOptions
+from docling.datamodel.pipeline_options import PdfPipelineOptions, TesseractOcrOptions
 from docling.chunking import HybridChunker
 from loguru import logger
 
@@ -139,11 +139,7 @@ def _build_pipeline_options(ocr_page_numbers: set[int]) -> PdfPipelineOptions:
 
     if ocr_page_numbers:
         options.do_ocr = True
-        # EasyOCR is Docling's default OCR backend — works well for
-        # typed engineering text. For handwritten annotations, consider
-        # switching to tesseract: options.ocr_options = TesseractOcrOptions()
-        ocr_opts = EasyOcrOptions()
-        ocr_opts.force_full_page_ocr = False  # Only OCR where text is absent
+        ocr_opts = TesseractOcrOptions()
         options.ocr_options = ocr_opts
 
         # Pass specific page numbers to OCR
