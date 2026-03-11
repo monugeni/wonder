@@ -45,7 +45,13 @@ from folder_manager import (
     resolve_folder,
     update_folder_doc_count,
 )
-from ingestor import ingest
+from ingestor import ingest_with_split
+from pdf_split import (
+    delete_all_manifests,
+    delete_manifest,
+    load_manifest,
+)
+from progress import tracker
 from tree_retriever import deep_query as _deep_query
 from tree_store import delete_all_trees, delete_tree
 from vector_store import (
@@ -122,6 +128,11 @@ class QueryInput(BaseModel):
     """Whether to include table chunks in results (default True)."""
 
 
+class CancelIngestionInput(BaseModel):
+    job_id: str
+    """The job ID to cancel. Use list_ingestion_jobs to find active job IDs."""
+
+
 class DeepQueryInput(BaseModel):
     folder: str
     """Folder ID or exact folder name to search within."""
@@ -178,10 +189,12 @@ async def list_tools() -> ListToolsResult:
             name="ingest_document",
             description=(
                 "Parse a PDF or DOCX and index it into a specific folder. "
-                "Docling extracts hierarchical structure and tables. "
-                "Claude stamps each chunk with its document/chapter/section context. "
-                "OCR is applied automatically to scanned pages only. "
-                "Example: ingest_document(folder='Project 269 — BPCL Kochi', file_path='/docs/P269-PIPE-SPEC.pdf')"
+                "Large PDFs (100+ pages) are automatically split into sub-documents "
+                "using a 10-engine heuristic splitter before ingestion — handles "
+                "500MB tender packages with 10,000+ pages. "
+                "Each sub-document gets full hierarchical parsing, contextual enrichment, "
+                "and section tree building. OCR is applied automatically to scanned pages only. "
+                "Example: ingest_document(folder='Project 269 — BPCL Kochi', file_path='/docs/tender_package.pdf')"
             ),
             inputSchema=IngestDocumentInput.model_json_schema(),
         ),
@@ -225,20 +238,42 @@ async def list_tools() -> ListToolsResult:
             ),
             inputSchema=DeepQueryInput.model_json_schema(),
         ),
+
+        Tool(
+            name="list_ingestion_jobs",
+            description=(
+                "List all ingestion jobs with their current status and progress. "
+                "Shows running, completed, and failed jobs. "
+                "Useful for monitoring long-running ingestion of large tender PDFs."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+
+        Tool(
+            name="cancel_ingestion_job",
+            description=(
+                "Cancel a running ingestion job. The job will stop at the next "
+                "safe checkpoint and clean up any partially-ingested data. "
+                "Use list_ingestion_jobs to find the job_id."
+            ),
+            inputSchema=CancelIngestionInput.model_json_schema(),
+        ),
     ])
 
 
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> CallToolResult:
     handlers = {
-        "create_folder":   _handle_create_folder,
-        "list_folders":    _handle_list_folders,
-        "delete_folder":   _handle_delete_folder,
-        "ingest_document": _handle_ingest,
-        "list_documents":  _handle_list_documents,
-        "delete_document": _handle_delete_document,
-        "query":           _handle_query,
-        "deep_query":      _handle_deep_query,
+        "create_folder":        _handle_create_folder,
+        "list_folders":         _handle_list_folders,
+        "delete_folder":        _handle_delete_folder,
+        "ingest_document":      _handle_ingest,
+        "list_documents":       _handle_list_documents,
+        "delete_document":      _handle_delete_document,
+        "query":                _handle_query,
+        "deep_query":           _handle_deep_query,
+        "list_ingestion_jobs":  _handle_list_jobs,
+        "cancel_ingestion_job": _handle_cancel_job,
     }
     handler = handlers.get(name)
     if not handler:
@@ -359,6 +394,9 @@ async def _handle_delete_folder(arguments: dict) -> CallToolResult:
         # Clean up all trees for this folder
         trees_removed = delete_all_trees(folder_id)
 
+        # Clean up all split manifests for this folder
+        manifests_removed = delete_all_manifests(folder_id)
+
         # Remove from registry
         delete_folder(folder_id)
 
@@ -369,7 +407,8 @@ async def _handle_delete_folder(arguments: dict) -> CallToolResult:
                     f"Folder '{folder['name']}' deleted.\n"
                     f"Qdrant collection '{collection_name}' dropped.\n"
                     f"All {folder['doc_count']} document(s) and their chunks removed.\n"
-                    f"{trees_removed} tree(s) and {tables_removed} table artifact(s) cleaned up."
+                    f"{trees_removed} tree(s), {tables_removed} table artifact(s), "
+                    f"and {manifests_removed} split manifest(s) cleaned up."
                 )
             )]
         )
@@ -388,9 +427,10 @@ async def _handle_ingest(arguments: dict) -> CallToolResult:
     try:
         args = IngestDocumentInput(**arguments)
         folder = resolve_folder(args.folder)
+        job_id = tracker.create_job(args.file_path, folder["name"])
         loop = asyncio.get_event_loop()
         summary = await loop.run_in_executor(
-            None, ingest, args.file_path, folder["folder_id"]
+            None, ingest_with_split, args.file_path, folder["folder_id"], job_id
         )
         return CallToolResult(
             content=[TextContent(type="text", text=json.dumps(summary, indent=2))]
@@ -454,32 +494,61 @@ async def _handle_delete_document(arguments: dict) -> CallToolResult:
         collection_name = folder["collection_name"]
         folder_id = folder["folder_id"]
 
-        # Collect table artifact IDs before deleting chunks from Qdrant
-        table_ids = get_table_ids(collection_name, args.source_file)
+        details = []
 
-        # Delete chunks from Qdrant
-        count = delete_document(collection_name, args.source_file)
+        # Check if this is a split parent document (has a manifest)
+        manifest = load_manifest(folder_id, args.source_file)
+        if manifest:
+            # Delete all split parts
+            total_chunks = 0
+            total_tables = 0
+            for part in manifest["parts"]:
+                part_file = part["filename"]
+                # Clean up table artifacts
+                part_table_ids = get_table_ids(collection_name, part_file)
+                count = delete_document(collection_name, part_file)
+                if count > 0:
+                    total_chunks += count
+                    update_folder_doc_count(folder_id, delta=-1)
+                for tid in part_table_ids:
+                    artifact_path = config.TABLE_STORE_DIR / f"{tid}.json"
+                    if artifact_path.exists():
+                        artifact_path.unlink()
+                        total_tables += 1
+                delete_tree(folder_id, part_file)
 
-        # Delete section tree from disk
-        tree_deleted = delete_tree(folder_id, args.source_file)
+            delete_manifest(folder_id, args.source_file)
+            details.append(
+                f"Deleted {len(manifest['parts'])} split parts "
+                f"({total_chunks} chunks) for '{args.source_file}' "
+                f"from folder '{folder['name']}'."
+            )
+            if total_tables:
+                details.append(f"{total_tables} table artifact(s) removed.")
+        else:
+            # Single document (not split) — original delete logic
+            table_ids = get_table_ids(collection_name, args.source_file)
+            count = delete_document(collection_name, args.source_file)
+            tree_deleted = delete_tree(folder_id, args.source_file)
 
-        # Delete table JSON artifacts from disk
-        tables_removed = 0
-        for tid in table_ids:
-            artifact_path = config.TABLE_STORE_DIR / f"{tid}.json"
-            if artifact_path.exists():
-                artifact_path.unlink()
-                tables_removed += 1
+            tables_removed = 0
+            for tid in table_ids:
+                artifact_path = config.TABLE_STORE_DIR / f"{tid}.json"
+                if artifact_path.exists():
+                    artifact_path.unlink()
+                    tables_removed += 1
 
-        # Decrement folder document count
-        if count > 0:
-            update_folder_doc_count(folder_id, delta=-1)
+            if count > 0:
+                update_folder_doc_count(folder_id, delta=-1)
 
-        details = [f"Deleted {count} chunks for '{args.source_file}' from folder '{folder['name']}'."]
-        if tree_deleted:
-            details.append("Section tree removed.")
-        if tables_removed:
-            details.append(f"{tables_removed} table artifact(s) removed.")
+            details.append(
+                f"Deleted {count} chunks for '{args.source_file}' "
+                f"from folder '{folder['name']}'."
+            )
+            if tree_deleted:
+                details.append("Section tree removed.")
+            if tables_removed:
+                details.append(f"{tables_removed} table artifact(s) removed.")
 
         return CallToolResult(
             content=[TextContent(type="text", text="\n".join(details))]
@@ -619,6 +688,77 @@ async def _handle_deep_query(arguments: dict) -> CallToolResult:
         logger.exception(f"deep_query error: {e}")
         return CallToolResult(
             content=[TextContent(type="text", text=f"Deep query failed: {e}")], isError=True
+        )
+
+
+async def _handle_list_jobs(arguments: dict) -> CallToolResult:
+    try:
+        jobs = tracker.list_jobs()
+        if not jobs:
+            return CallToolResult(
+                content=[TextContent(type="text", text="No ingestion jobs.")]
+            )
+
+        lines = [
+            f"{'Job ID':<12} {'Status':<12} {'Progress':>8}  {'Elapsed':>8}  {'File'}",
+            "-" * 80,
+        ]
+        for j in jobs:
+            pct = f"{round(j.get('progress', 0) * 100)}%"
+            elapsed = f"{j.get('elapsed', 0):.0f}s"
+            lines.append(
+                f"{j['job_id']:<12} {j['status']:<12} {pct:>8}  "
+                f"{elapsed:>8}  {j['source_file']}"
+            )
+            msg = j.get("message", "")
+            if msg:
+                lines.append(f"{'':12} {msg}")
+
+        return CallToolResult(content=[TextContent(type="text", text="\n".join(lines))])
+    except Exception as e:
+        logger.exception(f"list_ingestion_jobs error: {e}")
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"Failed: {e}")], isError=True
+        )
+
+
+async def _handle_cancel_job(arguments: dict) -> CallToolResult:
+    try:
+        args = CancelIngestionInput(**arguments)
+        job = tracker.get_job(args.job_id)
+        if not job:
+            return CallToolResult(
+                content=[TextContent(type="text", text=f"Job '{args.job_id}' not found.")],
+                isError=True,
+            )
+        if job["status"] not in ("pending", "running"):
+            return CallToolResult(
+                content=[TextContent(
+                    type="text",
+                    text=f"Job '{args.job_id}' is already {job['status']}. Cannot cancel."
+                )],
+                isError=True,
+            )
+        ok = tracker.cancel_job(args.job_id)
+        if ok:
+            return CallToolResult(
+                content=[TextContent(
+                    type="text",
+                    text=(
+                        f"Cancellation signal sent to job '{args.job_id}'.\n"
+                        f"The job will stop at the next checkpoint and clean up "
+                        f"partially-ingested data. Use list_ingestion_jobs to verify."
+                    )
+                )]
+            )
+        return CallToolResult(
+            content=[TextContent(type="text", text="Could not cancel job.")],
+            isError=True,
+        )
+    except Exception as e:
+        logger.exception(f"cancel_ingestion_job error: {e}")
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"Failed: {e}")], isError=True
         )
 
 

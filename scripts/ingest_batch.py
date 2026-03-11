@@ -18,7 +18,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../src"))
 
 from folder_manager import resolve_folder
-from ingestor import ingest
+from ingestor import ingest_with_split
 
 
 def main():
@@ -52,13 +52,22 @@ def main():
     for i, f in enumerate(files, 1):
         print(f"[{i}/{len(files)}] {os.path.basename(f)}")
         try:
-            summary = ingest(f, folder["folder_id"])
+            summary = ingest_with_split(f, folder["folder_id"])
             results.append(summary)
-            print(
-                f"  Done: {summary['total_chunks']} chunks "
-                f"({summary['table_chunks']} tables, {summary['ocr_chunks']} OCR'd) "
-                f"in {summary['total_time_seconds']}s"
-            )
+            if summary.get("split"):
+                print(
+                    f"  Done (split into {summary['total_parts']} parts): "
+                    f"{summary['total_chunks']} chunks "
+                    f"({summary['table_chunks']} tables) "
+                    f"in {summary['total_time_seconds']}s"
+                )
+            else:
+                print(
+                    f"  Done: {summary.get('total_chunks', 0)} chunks "
+                    f"({summary.get('table_chunks', 0)} tables, "
+                    f"{summary.get('ocr_chunks', 0)} OCR'd) "
+                    f"in {summary.get('total_time_seconds', 0)}s"
+                )
         except Exception as e:
             print(f"  FAILED: {e}")
             results.append({"status": "error", "file": f, "error": str(e)})

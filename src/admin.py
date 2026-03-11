@@ -3,7 +3,7 @@ admin.py — REST API + static admin page for folder/document management
 
 Mounted alongside the MCP SSE server at /admin/*.
 Provides CRUD for folders and documents, file upload for ingestion,
-and raw vector search (no LLM — just cosine similarity results).
+real-time progress streaming via SSE, and raw vector search.
 
 Endpoints:
   GET  /admin/                              — admin HTML page
@@ -12,18 +12,23 @@ Endpoints:
   DELETE /admin/api/folders/{id}            — delete a folder
   GET  /admin/api/folders/{id}/documents    — list documents in a folder
   DELETE /admin/api/folders/{id}/documents/{filename} — delete a document
-  POST /admin/api/folders/{id}/ingest       — upload + ingest a file
+  POST /admin/api/folders/{id}/ingest       — upload + start ingestion (returns job_id)
+  GET  /admin/api/jobs                      — list all ingestion jobs
+  GET  /admin/api/jobs/{job_id}             — get job status (polling)
+  GET  /admin/api/jobs/{job_id}/events      — SSE stream of progress events
   POST /admin/api/query                     — raw vector search (no LLM)
 """
 
+import asyncio
 import json
 import tempfile
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from loguru import logger
 from starlette.applications import Starlette
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 import sys
@@ -39,7 +44,9 @@ from folder_manager import (
     resolve_folder,
     update_folder_doc_count,
 )
-from ingestor import ingest
+from ingestor import IngestionCancelledError, ingest_with_split
+from pdf_split import delete_all_manifests, delete_manifest, load_manifest
+from progress import tracker
 from tree_store import delete_all_trees, delete_tree
 from vector_store import (
     create_collection,
@@ -52,6 +59,31 @@ from vector_store import (
 
 
 ADMIN_HTML = Path(__file__).parent / "static" / "admin.html"
+
+# Thread pool for background ingestion tasks
+_ingest_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ingest")
+
+
+# ── Background ingestion runner ──────────────────────────────────────────────
+
+def _run_ingest_job(file_path: Path, folder_id: str, job_id: str):
+    """Run ingestion in a background thread with progress tracking."""
+    try:
+        summary = ingest_with_split(str(file_path), folder_id, job_id=job_id)
+        tracker.emit(job_id, "done", message="Ingestion complete", summary=summary)
+    except IngestionCancelledError:
+        logger.info(f"Job {job_id} was cancelled — cleanup complete")
+        tracker.emit(job_id, "cancelled", message="Ingestion cancelled by user")
+    except Exception as e:
+        logger.exception(f"Background ingest failed: {e}")
+        tracker.emit(job_id, "error", message=str(e))
+    finally:
+        # Clean up temp file
+        try:
+            if file_path.exists():
+                file_path.unlink()
+        except OSError:
+            pass
 
 
 # ── Handlers ─────────────────────────────────────────────────────────────────
@@ -105,6 +137,7 @@ async def api_delete_folder(request):
 
         drop_collection(collection_name)
         delete_all_trees(folder_id)
+        delete_all_manifests(folder_id)
         delete_folder(folder_id)
 
         return JSONResponse({"status": "deleted", "folder_id": folder_id})
@@ -133,21 +166,40 @@ async def api_delete_document(request):
         folder = get_folder(folder_id)
         collection_name = folder["collection_name"]
 
-        # Clean up table artifacts
-        table_ids = get_table_ids(collection_name, filename)
-        count = delete_document(collection_name, filename)
-
-        for tid in table_ids:
-            artifact_path = config.TABLE_STORE_DIR / f"{tid}.json"
-            if artifact_path.exists():
-                artifact_path.unlink()
-
-        delete_tree(folder_id, filename)
-
-        if count > 0:
-            update_folder_doc_count(folder_id, delta=-1)
-
-        return JSONResponse({"status": "deleted", "chunks_removed": count})
+        # Check if this is a split parent document
+        manifest = load_manifest(folder_id, filename)
+        if manifest:
+            total_chunks = 0
+            for part in manifest["parts"]:
+                part_file = part["filename"]
+                part_table_ids = get_table_ids(collection_name, part_file)
+                count = delete_document(collection_name, part_file)
+                if count > 0:
+                    total_chunks += count
+                    update_folder_doc_count(folder_id, delta=-1)
+                for tid in part_table_ids:
+                    artifact_path = config.TABLE_STORE_DIR / f"{tid}.json"
+                    if artifact_path.exists():
+                        artifact_path.unlink()
+                delete_tree(folder_id, part_file)
+            delete_manifest(folder_id, filename)
+            return JSONResponse({
+                "status": "deleted",
+                "chunks_removed": total_chunks,
+                "split_parts_removed": len(manifest["parts"]),
+            })
+        else:
+            # Single document — original logic
+            table_ids = get_table_ids(collection_name, filename)
+            count = delete_document(collection_name, filename)
+            for tid in table_ids:
+                artifact_path = config.TABLE_STORE_DIR / f"{tid}.json"
+                if artifact_path.exists():
+                    artifact_path.unlink()
+            delete_tree(folder_id, filename)
+            if count > 0:
+                update_folder_doc_count(folder_id, delta=-1)
+            return JSONResponse({"status": "deleted", "chunks_removed": count})
     except KeyError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
     except Exception as e:
@@ -155,6 +207,7 @@ async def api_delete_document(request):
 
 
 async def api_ingest(request):
+    """Upload a file and start background ingestion. Returns job_id immediately."""
     try:
         folder_id = request.path_params["folder_id"]
         folder = get_folder(folder_id)
@@ -171,7 +224,7 @@ async def api_ingest(request):
                 status_code=400,
             )
 
-        # Save upload to temp file and ingest
+        # Save upload to temp file
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             content = await upload.read()
             tmp.write(content)
@@ -181,19 +234,90 @@ async def api_ingest(request):
         final_path = Path(tmp_path).parent / upload.filename
         Path(tmp_path).rename(final_path)
 
-        try:
-            summary = ingest(str(final_path), folder_id)
-            return JSONResponse({"status": "success", "summary": summary})
-        finally:
-            if final_path.exists():
-                final_path.unlink()
+        # Create a tracked job and start background ingestion
+        job_id = tracker.create_job(upload.filename, folder["name"])
+        _ingest_pool.submit(_run_ingest_job, final_path, folder_id, job_id)
+
+        return JSONResponse(
+            {"job_id": job_id, "status": "started", "source_file": upload.filename},
+            status_code=202,
+        )
 
     except (KeyError, ValueError) as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
         logger.exception(f"Ingest error: {e}")
-        return JSONResponse({"error": str(e), "traceback": traceback.format_exc()}, status_code=500)
+        return JSONResponse({"error": str(e)}, status_code=500)
 
+
+# ── Job status & SSE streaming ───────────────────────────────────────────────
+
+async def api_list_jobs(request):
+    """List all ingestion jobs (recent first)."""
+    return JSONResponse({"jobs": tracker.list_jobs()})
+
+
+async def api_job_status(request):
+    """Get current status of a specific job (polling endpoint)."""
+    job_id = request.path_params["job_id"]
+    job = tracker.get_job(job_id)
+    if not job:
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    return JSONResponse(job)
+
+
+async def api_job_events(request):
+    """SSE stream of progress events for a job."""
+    job_id = request.path_params["job_id"]
+    job = tracker.get_job(job_id)
+    if not job:
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+
+    async def event_stream():
+        loop = asyncio.get_event_loop()
+        q = tracker.subscribe(job_id, loop)
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=30.0)
+                    yield f"data: {json.dumps(event)}\n\n"
+                    # Stop streaming after terminal events
+                    if event.get("type") in ("done", "error", "cancelled"):
+                        break
+                except asyncio.TimeoutError:
+                    # Send keepalive comment to prevent connection timeout
+                    yield ": keepalive\n\n"
+        finally:
+            tracker.unsubscribe(job_id, q)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+async def api_cancel_job(request):
+    """Cancel a running ingestion job."""
+    job_id = request.path_params["job_id"]
+    job = tracker.get_job(job_id)
+    if not job:
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    if job["status"] not in ("pending", "running"):
+        return JSONResponse(
+            {"error": f"Job is already {job['status']}"}, status_code=400
+        )
+    ok = tracker.cancel_job(job_id)
+    if ok:
+        return JSONResponse({"status": "cancelling", "job_id": job_id})
+    return JSONResponse({"error": "Could not cancel job"}, status_code=400)
+
+
+# ── Query ────────────────────────────────────────────────────────────────────
 
 async def api_query(request):
     """Raw vector search — no LLM, just cosine similarity results."""
@@ -243,6 +367,10 @@ admin_routes = [
     Route("/api/folders/{folder_id}/documents", api_list_documents, methods=["GET"]),
     Route("/api/folders/{folder_id}/documents/{filename:path}", api_delete_document, methods=["DELETE"]),
     Route("/api/folders/{folder_id}/ingest", api_ingest, methods=["POST"]),
+    Route("/api/jobs", api_list_jobs, methods=["GET"]),
+    Route("/api/jobs/{job_id}", api_job_status, methods=["GET"]),
+    Route("/api/jobs/{job_id}/cancel", api_cancel_job, methods=["POST"]),
+    Route("/api/jobs/{job_id}/events", api_job_events, methods=["GET"]),
     Route("/api/query", api_query, methods=["POST"]),
 ]
 

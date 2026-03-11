@@ -159,6 +159,8 @@ def enrich_chunks_with_context(
     chunks: list[ParsedChunk],
     show_progress: bool = True,
     max_workers: int = 5,
+    on_progress: callable = None,
+    cancel_check: callable = None,
 ) -> list[tuple[ParsedChunk, str]]:
     """
     Enrich all chunks with context sentences using parallel API calls.
@@ -195,11 +197,21 @@ def enrich_chunks_with_context(
             for i, chunk in enumerate(chunks)
         }
         for future in as_completed(futures):
+            # Check for cancellation — cancel remaining futures
+            if cancel_check:
+                try:
+                    cancel_check()
+                except Exception:
+                    for f in futures:
+                        f.cancel()
+                    raise
             idx, sentence = future.result()
             context_sentences[idx] = sentence
             done_count += 1
             if show_progress and (done_count % 10 == 0 or done_count == total):
                 logger.info(f"  Contextualized {done_count}/{total} chunks...")
+            if on_progress and (done_count % 5 == 0 or done_count == total):
+                on_progress(done_count, total)
 
     results = []
     for i, chunk in enumerate(chunks):

@@ -324,7 +324,9 @@ def _collect_summary_tasks(nodes: list[dict], source_file: str, ancestors: list[
     return tasks
 
 
-def _summarise_tree(nodes: list[dict], source_file: str, ancestors: list[str] = [], max_workers: int = 5):
+def _summarise_tree(nodes: list[dict], source_file: str, ancestors: list[str] = [],
+                    max_workers: int = 5, on_progress: callable = None,
+                    cancel_check: callable = None):
     """
     Generate summaries for all tree nodes using parallel API calls.
     """
@@ -344,15 +346,26 @@ def _summarise_tree(nodes: list[dict], source_file: str, ancestors: list[str] = 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(_do_summary, t) for t in tasks]
         for future in as_completed(futures):
+            # Check for cancellation — cancel remaining futures
+            if cancel_check:
+                try:
+                    cancel_check()
+                except Exception:
+                    for f in futures:
+                        f.cancel()
+                    raise
             future.result()  # raise any unexpected exceptions
             done_count += 1
             if done_count % 10 == 0 or done_count == total:
                 logger.info(f"  Summarised {done_count}/{total} sections...")
+            if on_progress and (done_count % 5 == 0 or done_count == total):
+                on_progress(done_count, total)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def build_tree(doc, source_file: str, show_progress: bool = True) -> dict:
+def build_tree(doc, source_file: str, show_progress: bool = True,
+               on_progress: callable = None, cancel_check: callable = None) -> dict:
     """
     Build a section tree from a Docling DoclingDocument.
 
@@ -386,7 +399,8 @@ def build_tree(doc, source_file: str, show_progress: bool = True) -> dict:
     if show_progress:
         logger.info(f"  Generating section summaries (1 LLM call per section)...")
 
-    _summarise_tree(nodes, source_file)
+    _summarise_tree(nodes, source_file, on_progress=on_progress,
+                    cancel_check=cancel_check)
 
     total_nodes = sum(1 for _ in _iter_all_nodes(nodes))
     if show_progress:

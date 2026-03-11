@@ -9,6 +9,7 @@
     --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3a;
     --text: #e1e4ed; --muted: #8b8fa3; --accent: #6c8cff;
     --accent-hover: #8ba3ff; --danger: #ff6b6b; --success: #51cf66;
+    --warning: #fcc419;
     --radius: 8px; --font: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', monospace;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -70,6 +71,7 @@
   .upload-area { border: 2px dashed var(--border); border-radius: var(--radius); padding: 32px; text-align: center; color: var(--muted); cursor: pointer; transition: all 0.15s; }
   .upload-area:hover, .upload-area.dragover { border-color: var(--accent); color: var(--accent); }
   .upload-area input { display: none; }
+  .upload-area.disabled { pointer-events: none; opacity: 0.4; }
 
   /* Alerts */
   .alert { padding: 10px 14px; border-radius: var(--radius); margin-bottom: 16px; font-size: 13px; }
@@ -88,6 +90,33 @@
 
   /* Empty state */
   .empty { text-align: center; padding: 48px; color: var(--muted); }
+
+  /* ── Progress UI ──────────────────────────────────────── */
+  .progress-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; }
+  .progress-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .progress-header h3 { font-size: 14px; margin: 0; }
+  .progress-elapsed { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .progress-bar-outer { width: 100%; height: 6px; background: var(--border); border-radius: 3px; margin-bottom: 4px; overflow: hidden; }
+  .progress-bar-inner { height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.3s ease; min-width: 2px; }
+  .progress-bar-inner.complete { background: var(--success); }
+  .progress-bar-inner.error { background: var(--danger); }
+  .progress-percent { font-size: 11px; color: var(--muted); margin-bottom: 16px; text-align: right; font-variant-numeric: tabular-nums; }
+  .progress-steps { list-style: none; }
+  .progress-steps li { padding: 6px 0; font-size: 13px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid rgba(42,45,58,0.5); }
+  .progress-steps li:last-child { border-bottom: none; }
+  .step-icon { width: 20px; text-align: center; flex-shrink: 0; font-size: 14px; }
+  .step-icon.pending { color: var(--muted); }
+  .step-icon.running { color: var(--accent); }
+  .step-icon.done { color: var(--success); }
+  .step-icon.error { color: var(--danger); }
+  .step-label { flex: 1; }
+  .step-detail { color: var(--muted); font-size: 12px; }
+  .step-time { color: var(--muted); font-size: 12px; min-width: 50px; text-align: right; font-variant-numeric: tabular-nums; }
+  .progress-message { font-size: 12px; color: var(--accent); margin-top: 8px; font-style: italic; }
+  .btn-cancel { background: transparent; color: var(--danger); border: 1px solid var(--danger); padding: 4px 12px; font-size: 12px; border-radius: var(--radius); cursor: pointer; font-family: var(--font); font-weight: 500; transition: all 0.15s; }
+  .btn-cancel:hover { background: var(--danger); color: #fff; }
+  .btn-cancel:disabled { opacity: 0.4; cursor: not-allowed; }
+  .progress-bar-inner.cancelled { background: var(--warning); }
 </style>
 </head>
 <body>
@@ -137,7 +166,7 @@
 
   <!-- Ingest Panel -->
   <div class="panel" id="panel-ingest">
-    <div class="card">
+    <div class="card" id="ingest-form-card">
       <h3>Ingest Document</h3>
       <div class="form-row">
         <div class="form-group grow">
@@ -153,6 +182,7 @@
         <button class="btn btn-primary" id="ingest-btn" onclick="ingestFile()" disabled>Ingest</button>
       </div>
     </div>
+    <div id="ingest-progress"></div>
     <div id="ingest-result"></div>
   </div>
 
@@ -199,6 +229,8 @@
 const API = '/admin/api';
 let selectedFolder = null;
 let selectedFile = null;
+let activeJobId = null;
+let activeEventSource = null;
 
 // ── Tabs ──────────────────────────────────────────────────────────────────
 document.querySelectorAll('.tab').forEach(tab => {
@@ -364,32 +396,301 @@ async function ingestFile() {
   if (!folderId) { showAlert('Select a folder first'); return; }
 
   const btn = document.getElementById('ingest-btn');
-  const resEl = document.getElementById('ingest-result');
   btn.disabled = true;
-  btn.textContent = 'Ingesting...';
-  resEl.innerHTML = '<div class="loading"><span class="spinner"></span>Parsing, chunking, enriching, embedding... this may take a few minutes for large documents.</div>';
+  document.getElementById('upload-area').classList.add('disabled');
+  document.getElementById('ingest-result').innerHTML = '';
+
+  // Start upload
+  const form = new FormData();
+  form.append('file', selectedFile);
 
   try {
-    const form = new FormData();
-    form.append('file', selectedFile);
     const resp = await fetch(`${API}/folders/${folderId}/ingest`, { method: 'POST', body: form });
     const data = await resp.json();
-    if (!resp.ok) throw new Error(data.error || 'Ingest failed');
+    if (!resp.ok) throw new Error(data.error || 'Upload failed');
 
-    const s = data.summary;
-    resEl.innerHTML = `<div class="alert alert-success">
-      Ingested <strong>${esc(s.source_file)}</strong> into <strong>${esc(s.folder_name)}</strong><br>
-      ${s.total_chunks} chunks (${s.text_chunks} text, ${s.table_chunks} tables, ${s.ocr_chunks} OCR) | ${s.tree_nodes} tree nodes | ${s.total_time_seconds}s
-    </div>`;
-    selectedFile = null;
-    document.getElementById('file-input').value = '';
-    document.getElementById('upload-label').textContent = 'Drop a PDF or DOCX here, or click to browse';
+    activeJobId = data.job_id;
+    initProgressUI(selectedFile.name);
+    connectSSE(data.job_id);
+
   } catch(e) {
-    resEl.innerHTML = `<div class="alert alert-error">${esc(e.message)}</div>`;
-  } finally {
+    document.getElementById('ingest-result').innerHTML = `<div class="alert alert-error">${esc(e.message)}</div>`;
     btn.disabled = false;
-    btn.textContent = 'Ingest';
+    document.getElementById('upload-area').classList.remove('disabled');
   }
+}
+
+// ── Progress UI ──────────────────────────────────────────────────────────
+
+let progressState = {
+  steps: [],         // [{name, status, detail, seconds}]
+  progress: 0,
+  message: '',
+  startTime: null,
+  isSplit: false,
+  totalParts: 0,
+  currentPart: 0,
+};
+
+function initProgressUI(filename) {
+  progressState = {
+    steps: [],
+    progress: 0,
+    message: 'Starting...',
+    startTime: Date.now(),
+    filename: filename,
+    isSplit: false,
+    totalParts: 0,
+    currentPart: 0,
+    cancelled: false,
+  };
+  renderProgress();
+}
+
+function connectSSE(jobId) {
+  if (activeEventSource) activeEventSource.close();
+
+  const es = new EventSource(`${API}/jobs/${jobId}/events`);
+  activeEventSource = es;
+
+  es.onmessage = (e) => {
+    try {
+      const evt = JSON.parse(e.data);
+      handleProgressEvent(evt);
+    } catch(err) {}
+  };
+
+  es.onerror = () => {
+    es.close();
+    activeEventSource = null;
+  };
+}
+
+function handleProgressEvent(evt) {
+  const t = evt.type;
+
+  if (evt.progress !== undefined) progressState.progress = evt.progress;
+  if (evt.message) progressState.message = evt.message;
+  if (evt.elapsed !== undefined) progressState.elapsed = evt.elapsed;
+
+  if (t === 'splitting') {
+    progressState.isSplit = true;
+    upsertStep('splitting', 'running', 'Splitting PDF...', '');
+  }
+  else if (t === 'split_done') {
+    progressState.totalParts = evt.total_parts || 0;
+    upsertStep('splitting', 'done', evt.detail || '', fmtSec(evt.step_seconds));
+  }
+  else if (t === 'part_start') {
+    progressState.currentPart = evt.current_part || 0;
+    progressState.totalParts = evt.total_parts || progressState.totalParts;
+    const label = `Part ${evt.current_part}/${evt.total_parts}`;
+    upsertStep(`part_${evt.current_part}`, 'running', esc(evt.part_file || ''), '', label);
+    // Add sub-steps for this part
+    for (const sub of ['parse','tree','contextualise','embed','upsert']) {
+      upsertStep(`part_${evt.current_part}_${sub}`, 'pending', '', '', `  ${stepLabel(sub)}`);
+    }
+  }
+  else if (t === 'step') {
+    const stepKey = progressState.isSplit ? `part_${progressState.currentPart}_${evt.phase}` : evt.phase;
+    upsertStep(stepKey, 'running', evt.message || '', '', progressState.isSplit ? `  ${stepLabel(evt.phase)}` : stepLabel(evt.phase));
+  }
+  else if (t === 'step_progress') {
+    const stepKey = progressState.isSplit ? `part_${progressState.currentPart}_${evt.phase}` : evt.phase;
+    const detail = evt.step_done && evt.step_total ? `${evt.step_done}/${evt.step_total}` : '';
+    upsertStep(stepKey, 'running', detail, '', undefined);
+  }
+  else if (t === 'step_done') {
+    const stepKey = progressState.isSplit ? `part_${progressState.currentPart}_${evt.phase}` : evt.phase;
+    upsertStep(stepKey, 'done', evt.detail || '', fmtSec(evt.step_seconds));
+  }
+  else if (t === 'part_done') {
+    const partKey = `part_${evt.current_part}`;
+    const detail = evt.chunks ? `${evt.chunks} chunks` : '';
+    upsertStep(partKey, 'done', detail, '');
+    // Mark any pending sub-steps as done
+    for (const sub of ['parse','tree','contextualise','embed','upsert']) {
+      const sk = `part_${evt.current_part}_${sub}`;
+      const existing = progressState.steps.find(s => s.key === sk);
+      if (existing && existing.status !== 'done') {
+        existing.status = 'done';
+      }
+    }
+    // Add pending placeholders for remaining parts
+    for (let p = evt.current_part + 1; p <= progressState.totalParts; p++) {
+      const pk = `part_${p}`;
+      if (!progressState.steps.find(s => s.key === pk)) {
+        upsertStep(pk, 'pending', '', '', `Part ${p}/${progressState.totalParts}`);
+      }
+    }
+  }
+  else if (t === 'done') {
+    progressState.progress = 1.0;
+    progressState.message = 'Ingestion complete';
+    onIngestComplete(evt.summary);
+  }
+  else if (t === 'error') {
+    progressState.message = `Error: ${evt.message}`;
+    onIngestError(evt.message);
+  }
+  else if (t === 'cancelled') {
+    progressState.message = 'Cancelled by user';
+    progressState.cancelled = true;
+    onIngestCancelled();
+  }
+  else if (t === 'started') {
+    // For non-split: show the 5 pipeline steps as pending
+    if (!progressState.isSplit) {
+      for (const sub of ['parse','tree','contextualise','embed','upsert']) {
+        upsertStep(sub, 'pending', '', '', stepLabel(sub));
+      }
+    }
+  }
+
+  renderProgress();
+}
+
+function upsertStep(key, status, detail, seconds, label) {
+  let step = progressState.steps.find(s => s.key === key);
+  if (!step) {
+    step = { key, name: label || key, status: 'pending', detail: '', seconds: '' };
+    progressState.steps.push(step);
+  }
+  if (status) step.status = status;
+  if (detail !== undefined && detail !== '') step.detail = detail;
+  if (seconds !== undefined && seconds !== '') step.seconds = seconds;
+  if (label !== undefined) step.name = label;
+}
+
+function stepLabel(phase) {
+  const labels = {
+    parse: 'Parsing', tree: 'Tree building', contextualise: 'Contextualising',
+    embed: 'Embedding', upsert: 'Upserting', splitting: 'Splitting PDF',
+  };
+  return labels[phase] || phase;
+}
+
+function fmtSec(s) {
+  if (s === undefined || s === null) return '';
+  return s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s/60)}m ${(s%60).toFixed(0)}s`;
+}
+
+function fmtElapsed(sec) {
+  if (!sec) return '0s';
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+function renderProgress() {
+  const el = document.getElementById('ingest-progress');
+  const pct = Math.round(progressState.progress * 100);
+  const elapsed = progressState.elapsed || Math.round((Date.now() - progressState.startTime) / 1000);
+  const barClass = progressState.cancelled ? 'cancelled' : (pct >= 100 ? 'complete' : '');
+
+  // Filter out sub-steps that are pending and belong to future parts (keep it clean)
+  const visibleSteps = progressState.steps.filter(s => {
+    // Always show non-sub-steps
+    if (!s.key.includes('_parse') && !s.key.includes('_tree') && !s.key.includes('_contextualise') && !s.key.includes('_embed') && !s.key.includes('_upsert')) return true;
+    // For sub-steps, only show if parent part is running or done
+    const partNum = parseInt(s.key.split('_')[1]);
+    const partStep = progressState.steps.find(ps => ps.key === `part_${partNum}`);
+    return partStep && (partStep.status === 'running' || partStep.status === 'done');
+  });
+
+  let stepsHtml = '';
+  for (const s of visibleSteps) {
+    let icon = '';
+    if (s.status === 'done') icon = '<span class="step-icon done">&#10003;</span>';
+    else if (s.status === 'running') icon = '<span class="step-icon running"><span class="spinner" style="width:14px;height:14px;margin:0"></span></span>';
+    else if (s.status === 'error') icon = '<span class="step-icon error">&#10007;</span>';
+    else icon = '<span class="step-icon pending">&#9675;</span>';
+
+    stepsHtml += `<li>
+      ${icon}
+      <span class="step-label">${esc(s.name)}</span>
+      <span class="step-detail">${esc(s.detail)}</span>
+      <span class="step-time">${esc(s.seconds)}</span>
+    </li>`;
+  }
+
+  const showCancel = !progressState.cancelled && pct < 100;
+  const cancelBtn = showCancel
+    ? `<button class="btn-cancel" id="cancel-btn" onclick="cancelJob()">Cancel</button>`
+    : '';
+
+  el.innerHTML = `
+    <div class="progress-panel">
+      <div class="progress-header">
+        <h3>${esc(progressState.filename)}</h3>
+        <div style="display:flex;align-items:center;gap:12px">
+          ${cancelBtn}
+          <span class="progress-elapsed">${fmtElapsed(elapsed)}</span>
+        </div>
+      </div>
+      <div class="progress-bar-outer">
+        <div class="progress-bar-inner ${barClass}" style="width: ${pct}%"></div>
+      </div>
+      <div class="progress-percent">${pct}%</div>
+      <ul class="progress-steps">${stepsHtml}</ul>
+      <div class="progress-message">${esc(progressState.message)}</div>
+    </div>
+  `;
+}
+
+function onIngestComplete(summary) {
+  if (activeEventSource) { activeEventSource.close(); activeEventSource = null; }
+
+  const resEl = document.getElementById('ingest-result');
+  if (summary) {
+    const s = summary;
+    if (s.split) {
+      resEl.innerHTML = `<div class="alert alert-success">
+        Ingested <strong>${esc(s.source_file)}</strong> (split into ${s.total_parts} parts)<br>
+        ${s.total_chunks} total chunks | ${s.tree_nodes} tree nodes | ${s.total_time_seconds}s
+        ${s.parts_failed > 0 ? `<br><span style="color:var(--warning)">${s.parts_failed} part(s) failed</span>` : ''}
+      </div>`;
+    } else {
+      resEl.innerHTML = `<div class="alert alert-success">
+        Ingested <strong>${esc(s.source_file)}</strong><br>
+        ${s.total_chunks} chunks (${s.text_chunks} text, ${s.table_chunks} tables) | ${s.tree_nodes} tree nodes | ${s.total_time_seconds}s
+      </div>`;
+    }
+  }
+  resetIngestForm();
+}
+
+function onIngestError(message) {
+  if (activeEventSource) { activeEventSource.close(); activeEventSource = null; }
+  document.getElementById('ingest-result').innerHTML = `<div class="alert alert-error">${esc(message)}</div>`;
+  resetIngestForm();
+}
+
+function onIngestCancelled() {
+  if (activeEventSource) { activeEventSource.close(); activeEventSource = null; }
+  renderProgress();
+  document.getElementById('ingest-result').innerHTML = `<div class="alert" style="background:#2d2b1f;border:1px solid #5c5423;color:var(--warning)">Ingestion cancelled. Partially-ingested data has been cleaned up.</div>`;
+  resetIngestForm();
+}
+
+async function cancelJob() {
+  if (!activeJobId) return;
+  const btn = document.getElementById('cancel-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Cancelling...'; }
+  try {
+    await fetch(`${API}/jobs/${activeJobId}/cancel`, { method: 'POST' });
+  } catch(e) {
+    showAlert('Failed to cancel: ' + e.message);
+  }
+}
+
+function resetIngestForm() {
+  selectedFile = null;
+  document.getElementById('file-input').value = '';
+  document.getElementById('upload-label').textContent = 'Drop a PDF or DOCX here, or click to browse';
+  document.getElementById('ingest-btn').disabled = true;
+  document.getElementById('ingest-btn').textContent = 'Ingest';
+  document.getElementById('upload-area').classList.remove('disabled');
 }
 
 // ── Query ─────────────────────────────────────────────────────────────────
