@@ -117,6 +117,26 @@
   .btn-cancel:hover { background: var(--danger); color: #fff; }
   .btn-cancel:disabled { opacity: 0.4; cursor: not-allowed; }
   .progress-bar-inner.cancelled { background: var(--warning); }
+
+  /* Browse / Outline */
+  .outline-tree { list-style: none; font-size: 13px; }
+  .outline-tree li { padding: 4px 0; }
+  .outline-node { cursor: pointer; padding: 6px 10px; border-radius: var(--radius); display: flex; gap: 8px; align-items: flex-start; transition: background 0.1s; }
+  .outline-node:hover { background: var(--surface); }
+  .outline-node.active { background: var(--border); }
+  .outline-id { color: var(--muted); font-size: 11px; min-width: 48px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+  .outline-title { font-weight: 500; }
+  .outline-pages { color: var(--muted); font-size: 11px; margin-left: auto; flex-shrink: 0; }
+  .outline-summary { color: var(--muted); font-size: 12px; padding-left: 56px; padding-bottom: 4px; font-style: italic; }
+  .outline-children { padding-left: 20px; border-left: 1px solid var(--border); margin-left: 14px; }
+  .section-reader { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+  .section-header { margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+  .section-header h3 { font-size: 15px; margin-bottom: 4px; }
+  .section-meta { font-size: 12px; color: var(--muted); }
+  .section-body { font-size: 13px; white-space: pre-wrap; word-break: break-word; line-height: 1.7; max-height: 600px; overflow-y: auto; }
+  .browse-layout { display: grid; grid-template-columns: 380px 1fr; gap: 16px; }
+  .outline-pane { max-height: 700px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
+  @media (max-width: 900px) { .browse-layout { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -129,6 +149,7 @@
   <div class="tabs">
     <button class="tab active" data-tab="folders">Folders</button>
     <button class="tab" data-tab="documents">Documents</button>
+    <button class="tab" data-tab="browse">Browse</button>
     <button class="tab" data-tab="ingest">Ingest</button>
     <button class="tab" data-tab="query">Query</button>
   </div>
@@ -162,6 +183,22 @@
   <div class="panel" id="panel-documents">
     <div class="breadcrumb" id="doc-breadcrumb">Select a folder from the Folders tab</div>
     <div id="documents-list"></div>
+  </div>
+
+  <!-- Browse Panel -->
+  <div class="panel" id="panel-browse">
+    <div class="breadcrumb" id="browse-breadcrumb">Select a document to browse</div>
+    <div class="form-row" style="margin-bottom:16px">
+      <div class="form-group grow">
+        <label>Folder</label>
+        <select id="browse-folder" onchange="loadBrowseDocuments()"></select>
+      </div>
+      <div class="form-group grow">
+        <label>Document</label>
+        <select id="browse-document" onchange="loadOutline()"></select>
+      </div>
+    </div>
+    <div id="browse-content"></div>
   </div>
 
   <!-- Ingest Panel -->
@@ -242,6 +279,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     if (tab.dataset.tab === 'folders') loadFolders();
     if (tab.dataset.tab === 'ingest') loadFolderSelects();
     if (tab.dataset.tab === 'query') loadFolderSelects();
+    if (tab.dataset.tab === 'browse') loadFolderSelects();
   });
 });
 
@@ -398,9 +436,11 @@ async function renameDoc(filename) {
 async function loadFolderSelects() {
   try {
     const data = await api('/folders');
-    for (const sel of [document.getElementById('ingest-folder'), document.getElementById('query-folder')]) {
+    for (const sel of [document.getElementById('ingest-folder'), document.getElementById('query-folder'), document.getElementById('browse-folder')]) {
       const prev = sel.value;
-      sel.innerHTML = data.folders.map(f => `<option value="${f.folder_id}">${esc(f.name)}</option>`).join('');
+      const isBrowse = sel.id === 'browse-folder';
+      sel.innerHTML = (isBrowse ? '<option value="">-- select folder --</option>' : '')
+        + data.folders.map(f => `<option value="${f.folder_id}">${esc(f.name)}</option>`).join('');
       if (prev) sel.value = prev;
     }
   } catch(e) {}
@@ -780,6 +820,113 @@ async function runQuery() {
     el.innerHTML = html;
   } catch(e) {
     el.innerHTML = '';
+  }
+}
+
+// ── Browse ────────────────────────────────────────────────────────────────
+let browseState = { folderId: null, filename: null, outline: null };
+
+async function loadBrowseDocuments() {
+  const folderId = document.getElementById('browse-folder').value;
+  const docSel = document.getElementById('browse-document');
+  docSel.innerHTML = '<option value="">-- select document --</option>';
+  document.getElementById('browse-content').innerHTML = '';
+  if (!folderId) return;
+  browseState.folderId = folderId;
+  try {
+    const data = await api(`/folders/${folderId}/documents`);
+    for (const d of (data.documents || []).sort((a,b) => a.source_file.localeCompare(b.source_file))) {
+      docSel.innerHTML += `<option value="${esc(d.source_file)}">${esc(d.source_file)}</option>`;
+    }
+  } catch(e) {}
+}
+
+async function loadOutline() {
+  const folderId = document.getElementById('browse-folder').value;
+  const filename = document.getElementById('browse-document').value;
+  const el = document.getElementById('browse-content');
+  if (!folderId || !filename) { el.innerHTML = ''; return; }
+
+  browseState.folderId = folderId;
+  browseState.filename = filename;
+  el.innerHTML = '<div class="loading"><span class="spinner"></span>Loading outline...</div>';
+
+  try {
+    const resp = await fetch(`${API}/folders/${folderId}/documents/${encodeURIComponent(filename)}/outline`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'Failed to load outline');
+    browseState.outline = data.outline;
+
+    const bc = document.getElementById('browse-breadcrumb');
+    bc.innerHTML = `<strong>${esc(filename)}</strong> &mdash; ${esc(data.outline.doc_type)}`;
+
+    el.innerHTML = `<div class="browse-layout">
+      <div class="outline-pane" id="outline-pane">${renderOutlineTree(data.outline.nodes)}</div>
+      <div id="section-reader"><div class="empty" style="padding:40px">Select a section from the outline</div></div>
+    </div>`;
+  } catch(e) {
+    el.innerHTML = `<div class="alert alert-error">${esc(e.message)}</div>`;
+  }
+}
+
+function renderOutlineTree(nodes, depth = 0) {
+  if (!nodes || !nodes.length) return '';
+  let html = '<ul class="outline-tree">';
+  for (const n of nodes) {
+    const pages = n.page_start && n.page_end ? `pp. ${n.page_start}-${n.page_end}` : '';
+    html += `<li>
+      <div class="outline-node" data-node="${esc(n.node_id)}" onclick="readSection('${esc(n.node_id)}')">
+        <span class="outline-id">${esc(n.node_id)}</span>
+        <span class="outline-title">${esc(n.title)}</span>
+        <span class="outline-pages">${pages}</span>
+      </div>`;
+    if (n.summary) {
+      html += `<div class="outline-summary">${esc(n.summary)}</div>`;
+    }
+    if (n.children && n.children.length) {
+      html += `<div class="outline-children">${renderOutlineTree(n.children, depth + 1)}</div>`;
+    }
+    html += '</li>';
+  }
+  html += '</ul>';
+  return html;
+}
+
+async function readSection(nodeId) {
+  // Highlight active node
+  document.querySelectorAll('.outline-node').forEach(el => el.classList.remove('active'));
+  const activeEl = document.querySelector(`.outline-node[data-node="${nodeId}"]`);
+  if (activeEl) activeEl.classList.add('active');
+
+  const reader = document.getElementById('section-reader');
+  reader.innerHTML = '<div class="loading"><span class="spinner"></span>Loading section...</div>';
+
+  try {
+    const resp = await fetch(`${API}/folders/${browseState.folderId}/documents/${encodeURIComponent(browseState.filename)}/sections/${nodeId}`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'Failed');
+
+    const pages = data.page_start && data.page_end ? `pp. ${data.page_start}-${data.page_end}` : 'pages unknown';
+    let childHtml = '';
+    if (data.children && data.children.length) {
+      childHtml = '<div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)"><strong style="font-size:12px;color:var(--muted)">CHILD SECTIONS</strong>';
+      for (const c of data.children) {
+        childHtml += `<div style="padding:4px 0"><a style="color:var(--accent);cursor:pointer;text-decoration:none" onclick="readSection('${esc(c.node_id)}')">[${esc(c.node_id)}] ${esc(c.title)}</a></div>`;
+      }
+      childHtml += '</div>';
+    }
+
+    reader.innerHTML = `<div class="section-reader">
+      <div class="section-header">
+        <h3>${esc(data.title)}</h3>
+        <div class="section-meta">${esc(data.node_id)} &middot; Level ${data.level} &middot; ${pages}</div>
+        ${data.summary ? `<div style="margin-top:6px;font-size:12px;color:var(--accent);font-style:italic">${esc(data.summary)}</div>` : ''}
+      </div>
+      <div class="section-body">${esc(data.full_text || '(no text)')}</div>
+      ${childHtml}
+    </div>`;
+  } catch(e) {
+    reader.innerHTML = `<div class="alert alert-error">${esc(e.message)}</div>`;
   }
 }
 

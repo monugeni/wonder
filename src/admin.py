@@ -48,7 +48,15 @@ from folder_manager import (
 from ingestor import IngestionCancelledError, ingest_with_split
 from pdf_split import delete_all_manifests, delete_manifest, load_manifest, rename_manifest
 from progress import tracker
-from tree_store import delete_all_trees, delete_tree, rename_tree
+from tree_store import (
+    delete_all_trees,
+    delete_tree,
+    get_node_by_id,
+    list_trees,
+    load_tree,
+    rename_tree,
+    tree_summary_view,
+)
 from vector_store import (
     create_collection,
     delete_document,
@@ -377,6 +385,56 @@ async def api_cancel_job(request):
     return JSONResponse({"error": "Could not cancel job"}, status_code=400)
 
 
+# ── Browse (document outline + read section) ─────────────────────────────────
+
+async def api_document_outline(request):
+    """Get the section tree outline for a document."""
+    try:
+        folder_id = request.path_params["folder_id"]
+        filename = request.path_params["filename"]
+        folder = get_folder(folder_id)
+        tree = load_tree(folder_id, filename)
+        if not tree:
+            return JSONResponse({"error": f"No section tree for '{filename}'"}, status_code=404)
+        summary = tree_summary_view(tree)
+        return JSONResponse({"outline": summary})
+    except KeyError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def api_read_section(request):
+    """Read full text of a section by node_id."""
+    try:
+        folder_id = request.path_params["folder_id"]
+        filename = request.path_params["filename"]
+        node_id = request.path_params["node_id"]
+        tree = load_tree(folder_id, filename)
+        if not tree:
+            return JSONResponse({"error": f"No section tree for '{filename}'"}, status_code=404)
+        node = get_node_by_id(tree, node_id)
+        if not node:
+            return JSONResponse({"error": f"Section '{node_id}' not found"}, status_code=404)
+        return JSONResponse({
+            "node_id": node["node_id"],
+            "title": node["title"],
+            "level": node["level"],
+            "page_start": node.get("page_start"),
+            "page_end": node.get("page_end"),
+            "summary": node.get("summary", ""),
+            "full_text": node.get("full_text", ""),
+            "children": [
+                {"node_id": c["node_id"], "title": c["title"]}
+                for c in node.get("children", [])
+            ],
+        })
+    except KeyError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 # ── Query ────────────────────────────────────────────────────────────────────
 
 async def api_query(request):
@@ -428,6 +486,8 @@ admin_routes = [
     Route("/api/folders/{folder_id}/documents", api_list_documents, methods=["GET"]),
     Route("/api/folders/{folder_id}/documents/{filename:path}/rename", api_rename_document, methods=["PATCH"]),
     Route("/api/folders/{folder_id}/documents/{filename:path}", api_delete_document, methods=["DELETE"]),
+    Route("/api/folders/{folder_id}/documents/{filename:path}/outline", api_document_outline, methods=["GET"]),
+    Route("/api/folders/{folder_id}/documents/{filename:path}/sections/{node_id}", api_read_section, methods=["GET"]),
     Route("/api/folders/{folder_id}/ingest", api_ingest, methods=["POST"]),
     Route("/api/jobs", api_list_jobs, methods=["GET"]),
     Route("/api/jobs/{job_id}", api_job_status, methods=["GET"]),

@@ -55,7 +55,15 @@ from pdf_split import (
 )
 from progress import tracker
 from tree_retriever import deep_query as _deep_query
-from tree_store import delete_all_trees, delete_tree, rename_tree
+from tree_store import (
+    delete_all_trees,
+    delete_tree,
+    get_node_by_id,
+    list_trees,
+    load_tree,
+    rename_tree,
+    tree_summary_view,
+)
 from vector_store import (
     create_collection,
     delete_document,
@@ -150,6 +158,33 @@ class RenameDocumentInput(BaseModel):
 class CancelIngestionInput(BaseModel):
     job_id: str
     """The job ID to cancel. Use list_ingestion_jobs to find active job IDs."""
+
+
+class DocumentOutlineInput(BaseModel):
+    folder: str
+    """Folder ID or exact folder name."""
+    source_file: str
+    """Filename of the document to browse. E.g. 'P269-PIPE-SPEC-REV2.pdf'"""
+
+
+class ReadSectionInput(BaseModel):
+    folder: str
+    """Folder ID or exact folder name."""
+    source_file: str
+    """Filename of the document."""
+    node_id: str
+    """Section node_id from the document outline. E.g. 'n_0003'"""
+
+
+class ReadPageRangeInput(BaseModel):
+    folder: str
+    """Folder ID or exact folder name."""
+    source_file: str
+    """Filename of the document."""
+    page_start: int
+    """First page number (1-based)."""
+    page_end: int
+    """Last page number (1-based, inclusive)."""
 
 
 class DeepQueryInput(BaseModel):
@@ -260,6 +295,40 @@ async def list_tools() -> ListToolsResult:
         ),
 
         Tool(
+            name="document_outline",
+            description=(
+                "Get the hierarchical section outline of a document with summaries. "
+                "Use this to understand the structure of a tender document before reading specific sections. "
+                "Returns a tree of sections with titles, page ranges, and 1-2 sentence summaries. "
+                "Use the node_id values to call read_section for full text. "
+                "Example: document_outline(folder='Project 269', source_file='tender_package_part001.pdf')"
+            ),
+            inputSchema=DocumentOutlineInput.model_json_schema(),
+        ),
+
+        Tool(
+            name="read_section",
+            description=(
+                "Read the full text of a specific section from a document. "
+                "Use document_outline first to get node_ids, then call this to read any section. "
+                "Returns the section title, page range, and complete text including tables. "
+                "Example: read_section(folder='Project 269', source_file='spec.pdf', node_id='n_0003')"
+            ),
+            inputSchema=ReadSectionInput.model_json_schema(),
+        ),
+
+        Tool(
+            name="read_page_range",
+            description=(
+                "Read all content from a specific page range of a document. "
+                "Collects all sections that overlap the given pages. "
+                "Use this when you know the page numbers but not the section IDs. "
+                "Example: read_page_range(folder='Project 269', source_file='spec.pdf', page_start=10, page_end=15)"
+            ),
+            inputSchema=ReadPageRangeInput.model_json_schema(),
+        ),
+
+        Tool(
             name="deep_query",
             description=(
                 "Hybrid deep query: vector coarse filter to find candidate documents, "
@@ -307,6 +376,9 @@ async def call_tool(name: str, arguments: dict) -> CallToolResult:
         "delete_document":      _handle_delete_document,
         "rename_document":      _handle_rename_document,
         "query":                _handle_query,
+        "document_outline":     _handle_document_outline,
+        "read_section":         _handle_read_section,
+        "read_page_range":      _handle_read_page_range,
         "deep_query":           _handle_deep_query,
         "list_ingestion_jobs":  _handle_list_jobs,
         "cancel_ingestion_job": _handle_cancel_job,
@@ -742,6 +814,187 @@ async def _handle_query(arguments: dict) -> CallToolResult:
         )
 
 
+
+
+async def _handle_document_outline(arguments: dict) -> CallToolResult:
+    try:
+        args = DocumentOutlineInput(**arguments)
+        folder = resolve_folder(args.folder)
+        tree = load_tree(folder["folder_id"], args.source_file)
+        if not tree:
+            return CallToolResult(
+                content=[TextContent(
+                    type="text",
+                    text=f"No section tree found for '{args.source_file}' in folder '{folder['name']}'."
+                )],
+                isError=True,
+            )
+        summary = tree_summary_view(tree)
+
+        def _format_node(node, indent=0):
+            prefix = "  " * indent
+            pages = (
+                f"pp. {node['page_start']}-{node['page_end']}"
+                if node.get("page_start") else "pages unknown"
+            )
+            lines = [f"{prefix}[{node['node_id']}] {node['title']}  ({pages})"]
+            if node.get("summary"):
+                lines.append(f"{prefix}  {node['summary']}")
+            for child in node.get("children", []):
+                lines.extend(_format_node(child, indent + 1))
+            return lines
+
+        output_lines = [
+            f"Document: {summary['source_file']}",
+            f"Type:     {summary['doc_type']}",
+            f"Folder:   {folder['name']}",
+            "=" * 60,
+            "",
+            "Use read_section(node_id='...') to read any section's full text.",
+            "",
+        ]
+        for node in summary["nodes"]:
+            output_lines.extend(_format_node(node))
+            output_lines.append("")
+
+        return CallToolResult(
+            content=[TextContent(type="text", text="\n".join(output_lines))]
+        )
+    except (KeyError, ValueError) as e:
+        return CallToolResult(
+            content=[TextContent(type="text", text=str(e))], isError=True
+        )
+    except Exception as e:
+        logger.exception(f"document_outline error: {e}")
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"Failed: {e}")], isError=True
+        )
+
+
+async def _handle_read_section(arguments: dict) -> CallToolResult:
+    try:
+        args = ReadSectionInput(**arguments)
+        folder = resolve_folder(args.folder)
+        tree = load_tree(folder["folder_id"], args.source_file)
+        if not tree:
+            return CallToolResult(
+                content=[TextContent(
+                    type="text",
+                    text=f"No section tree found for '{args.source_file}'."
+                )],
+                isError=True,
+            )
+        node = get_node_by_id(tree, args.node_id)
+        if not node:
+            return CallToolResult(
+                content=[TextContent(
+                    type="text",
+                    text=f"Section '{args.node_id}' not found in '{args.source_file}'."
+                )],
+                isError=True,
+            )
+
+        pages = (
+            f"pp. {node['page_start']}-{node['page_end']}"
+            if node.get("page_start") else "pages unknown"
+        )
+        child_info = ""
+        if node.get("children"):
+            child_titles = [f"  [{c['node_id']}] {c['title']}" for c in node["children"]]
+            child_info = "\n\nChild sections:\n" + "\n".join(child_titles)
+
+        output = (
+            f"Section: {node['title']}\n"
+            f"Node ID: {node['node_id']}  |  Level: {node['level']}  |  {pages}\n"
+            f"Summary: {node.get('summary', '')}\n"
+            f"{'=' * 60}\n\n"
+            f"{node.get('full_text', '(no text)')}"
+            f"{child_info}"
+        )
+        return CallToolResult(
+            content=[TextContent(type="text", text=output)]
+        )
+    except (KeyError, ValueError) as e:
+        return CallToolResult(
+            content=[TextContent(type="text", text=str(e))], isError=True
+        )
+    except Exception as e:
+        logger.exception(f"read_section error: {e}")
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"Failed: {e}")], isError=True
+        )
+
+
+async def _handle_read_page_range(arguments: dict) -> CallToolResult:
+    try:
+        args = ReadPageRangeInput(**arguments)
+        folder = resolve_folder(args.folder)
+        tree = load_tree(folder["folder_id"], args.source_file)
+        if not tree:
+            return CallToolResult(
+                content=[TextContent(
+                    type="text",
+                    text=f"No section tree found for '{args.source_file}'."
+                )],
+                isError=True,
+            )
+
+        target = set(range(args.page_start, args.page_end + 1))
+
+        def _collect(nodes):
+            results = []
+            for node in nodes:
+                ps = node.get("page_start")
+                pe = node.get("page_end")
+                if ps and pe:
+                    node_pages = set(range(ps, pe + 1))
+                    if node_pages & target:
+                        results.append(node)
+                results.extend(_collect(node.get("children", [])))
+            return results
+
+        matching = _collect(tree["nodes"])
+        if not matching:
+            return CallToolResult(
+                content=[TextContent(
+                    type="text",
+                    text=f"No sections found on pages {args.page_start}-{args.page_end}."
+                )]
+            )
+
+        # Sort by page_start, deduplicate
+        seen = set()
+        unique = []
+        for node in sorted(matching, key=lambda n: n.get("page_start", 0)):
+            if node["node_id"] not in seen:
+                seen.add(node["node_id"])
+                unique.append(node)
+
+        output_lines = [
+            f"Document: {args.source_file}",
+            f"Pages:    {args.page_start}-{args.page_end}",
+            f"Sections: {len(unique)}",
+            "=" * 60,
+        ]
+        for node in unique:
+            pages = f"pp. {node.get('page_start', '?')}-{node.get('page_end', '?')}"
+            output_lines.append(
+                f"\n--- [{node['node_id']}] {node['title']} ({pages}) ---\n"
+            )
+            output_lines.append(node.get("full_text", "(no text)"))
+
+        return CallToolResult(
+            content=[TextContent(type="text", text="\n".join(output_lines))]
+        )
+    except (KeyError, ValueError) as e:
+        return CallToolResult(
+            content=[TextContent(type="text", text=str(e))], isError=True
+        )
+    except Exception as e:
+        logger.exception(f"read_page_range error: {e}")
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"Failed: {e}")], isError=True
+        )
 
 
 async def _handle_deep_query(arguments: dict) -> CallToolResult:
