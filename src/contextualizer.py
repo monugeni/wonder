@@ -203,7 +203,13 @@ def enrich_chunks_with_context(
 
     results = []
     for i, chunk in enumerate(chunks):
-        enriched_text = f"{context_sentences[i]}\n\n{chunk.text}"
+        # Prepend heading breadcrumb directly into the embedded text so the
+        # embedding model always sees the section hierarchy, even if the
+        # LLM context sentence didn't capture it correctly.
+        heading_prefix = ""
+        if chunk.headings:
+            heading_prefix = f"[{' > '.join(chunk.headings)}]\n"
+        enriched_text = f"{heading_prefix}{context_sentences[i]}\n\n{chunk.text}"
         results.append((chunk, enriched_text))
 
     logger.info(f"  Contextualization complete: {len(results)} chunks enriched")
