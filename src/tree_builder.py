@@ -26,6 +26,7 @@ import json
 import re
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -300,16 +301,12 @@ def _breadcrumb(node: dict, ancestors: list[str]) -> str:
     return " > ".join(ancestors + [node["title"]]) if ancestors else node["title"]
 
 
-def _summarise_tree(nodes: list[dict], source_file: str, ancestors: list[str] = []):
-    """
-    Recursively walk the tree and generate a summary for each node.
-    Deeper nodes are summarised first so parent summaries can optionally
-    incorporate child topics (we keep them independent for simplicity).
-    """
+def _collect_summary_tasks(nodes: list[dict], source_file: str, ancestors: list[str] = []) -> list[tuple[dict, str, str, str]]:
+    """Collect all (node, source_file, breadcrumb, content) tuples for parallel summarisation."""
+    tasks = []
     for node in nodes:
-        # Recurse into children first
         if node["children"]:
-            _summarise_tree(node["children"], source_file, ancestors + [node["title"]])
+            tasks.extend(_collect_summary_tasks(node["children"], source_file, ancestors + [node["title"]]))
 
         pages_str = (
             f"{node['page_start']}-{node['page_end']}"
@@ -319,17 +316,38 @@ def _summarise_tree(nodes: list[dict], source_file: str, ancestors: list[str] = 
         breadcrumb = _breadcrumb(node, ancestors)
         content = node["full_text"]
 
-        # If the section has no direct text (only children), summarise from title only
         if not content.strip():
             child_titles = ", ".join(c["title"] for c in node["children"][:5])
             content = f"Section covering: {child_titles}" if child_titles else node["title"]
 
+        tasks.append((node, source_file, breadcrumb, pages_str, content))
+    return tasks
+
+
+def _summarise_tree(nodes: list[dict], source_file: str, ancestors: list[str] = [], max_workers: int = 10):
+    """
+    Generate summaries for all tree nodes using parallel API calls.
+    """
+    tasks = _collect_summary_tasks(nodes, source_file, ancestors)
+    total = len(tasks)
+    done_count = 0
+
+    def _do_summary(task):
+        node, sf, breadcrumb, pages_str, content = task
         try:
-            node["summary"] = _summarise(source_file, breadcrumb, pages_str, content)
+            node["summary"] = _summarise(sf, breadcrumb, pages_str, content)
             logger.debug(f"  Summarised: {node['title'][:60]}")
         except Exception as e:
             logger.warning(f"  Summary failed for '{node['title']}': {e}")
             node["summary"] = f"Section: {node['title']} (pages {pages_str})"
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_do_summary, t) for t in tasks]
+        for future in as_completed(futures):
+            future.result()  # raise any unexpected exceptions
+            done_count += 1
+            if done_count % 10 == 0 or done_count == total:
+                logger.info(f"  Summarised {done_count}/{total} sections...")
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

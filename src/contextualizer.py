@@ -13,6 +13,8 @@ Batching: Contextualizing one chunk per API call is expensive. This module
 processes chunks in batches and uses claude-haiku for cost efficiency.
 """
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import anthropic
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -102,9 +104,10 @@ def build_context_sentence(chunk: ParsedChunk) -> str:
 def enrich_chunks_with_context(
     chunks: list[ParsedChunk],
     show_progress: bool = True,
+    max_workers: int = 10,
 ) -> list[tuple[ParsedChunk, str]]:
     """
-    Enrich all chunks with context sentences.
+    Enrich all chunks with context sentences using parallel API calls.
 
     Returns a list of (chunk, context_enriched_text) pairs where
     context_enriched_text = context_sentence + "\\n\\n" + chunk.text
@@ -115,19 +118,34 @@ def enrich_chunks_with_context(
     Args:
         chunks: List of parsed chunks
         show_progress: Whether to log progress (useful for large documents)
+        max_workers: Max concurrent API calls (default 10)
 
     Returns:
         List of (ParsedChunk, enriched_text) tuples ready for embedding
     """
-    results = []
     total = len(chunks)
+    # Pre-allocate results list to maintain chunk order
+    context_sentences = [""] * total
+    done_count = 0
 
+    def _process(index: int, chunk: ParsedChunk) -> tuple[int, str]:
+        return index, build_context_sentence(chunk)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_process, i, chunk): i
+            for i, chunk in enumerate(chunks)
+        }
+        for future in as_completed(futures):
+            idx, sentence = future.result()
+            context_sentences[idx] = sentence
+            done_count += 1
+            if show_progress and (done_count % 10 == 0 or done_count == total):
+                logger.info(f"  Contextualized {done_count}/{total} chunks...")
+
+    results = []
     for i, chunk in enumerate(chunks):
-        if show_progress and (i % 10 == 0 or i == total - 1):
-            logger.info(f"  Contextualizing chunk {i+1}/{total}...")
-
-        context_sentence = build_context_sentence(chunk)
-        enriched_text = f"{context_sentence}\n\n{chunk.text}"
+        enriched_text = f"{context_sentences[i]}\n\n{chunk.text}"
         results.append((chunk, enriched_text))
 
     logger.info(f"  Contextualization complete: {len(results)} chunks enriched")
