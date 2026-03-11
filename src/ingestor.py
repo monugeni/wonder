@@ -98,6 +98,12 @@ def ingest(file_path: str | Path, folder_id: str) -> dict:
         tree_time = 0.0
         tree_nodes = 0
 
+    # Step 2b: Use tree to assign better section headings to chunks
+    try:
+        _enrich_headings_from_tree(chunks, tree)
+    except Exception as e:
+        logger.warning(f"Step 2b (tree headings): failed — {e}")
+
     # Step 3: Contextual Retrieval enrichment
     t0 = time.time()
     enriched_pairs = enrich_chunks_with_context(chunks, show_progress=True)
@@ -156,3 +162,86 @@ def _iter_nodes(nodes):
     for n in nodes:
         yield n
         yield from _iter_nodes(n.get("children", []))
+
+
+def _enrich_headings_from_tree(chunks, tree):
+    """
+    Use the section tree to give chunks better heading breadcrumbs.
+
+    The tree walker sees headings that HybridChunker may have missed (e.g.
+    'TECHNICAL CRITERIA:-') because the tree walks the full Docling body.
+    For each chunk we find the best-matching tree node by page overlap or
+    content overlap (for pageless tables) and prepend any ancestor section
+    titles that the chunk is missing.
+    """
+    if not tree or not tree.get("nodes"):
+        return
+
+    # Build a list of (breadcrumb, page_range, full_text) from the tree
+    tree_sections = []
+
+    def _collect(nodes, ancestors=None):
+        if ancestors is None:
+            ancestors = []
+        for node in nodes:
+            ps = node.get("page_start")
+            pe = node.get("page_end")
+            breadcrumb = ancestors + [node["title"]]
+            tree_sections.append({
+                "breadcrumb": breadcrumb,
+                "page_start": ps,
+                "page_end": pe,
+                "full_text": node.get("full_text", ""),
+            })
+            _collect(node.get("children", []), breadcrumb)
+
+    _collect(tree["nodes"])
+
+    for chunk in chunks:
+        best_match = None
+        best_score = 0
+
+        for sec in tree_sections:
+            score = 0
+            # Page overlap scoring
+            if chunk.page_numbers and sec["page_start"] and sec["page_end"]:
+                page_set = set(range(sec["page_start"], sec["page_end"] + 1))
+                overlap = len(set(chunk.page_numbers) & page_set)
+                if overlap > 0:
+                    score += overlap * 10
+
+                    # Bonus for matching heading text
+                    if chunk.headings:
+                        chunk_hdg = chunk.headings[-1].lower().strip("*: ")
+                        sec_title = sec["breadcrumb"][-1].lower().strip("*: ")
+                        if chunk_hdg == sec_title or chunk_hdg in sec_title:
+                            score += 50
+
+            # Content overlap for pageless chunks (e.g. orphan tables)
+            elif not chunk.page_numbers and sec["full_text"]:
+                # Check if chunk text appears in tree node content
+                chunk_snippet = chunk.text[:200]
+                if chunk_snippet and chunk_snippet[:80] in sec["full_text"]:
+                    score += 100  # Strong match
+
+            # Prefer deeper (more specific) breadcrumbs
+            score += len(sec["breadcrumb"])
+
+            if score > best_score:
+                best_score = score
+                best_match = sec
+
+        if best_match and best_score > 5:
+            # Build improved heading: tree ancestors + chunk's own heading
+            tree_bc = best_match["breadcrumb"]
+            existing = set(h.lower().strip("*: ") for h in chunk.headings)
+            # Prepend tree headings that the chunk doesn't already have
+            new_headings = []
+            for h in tree_bc:
+                if h.lower().strip("*: ") not in existing:
+                    new_headings.append(h)
+            if new_headings:
+                chunk.headings = new_headings + chunk.headings
+                logger.debug(
+                    f"  Tree enriched: {chunk.chunk_id[:8]} → {chunk.headings}"
+                )
