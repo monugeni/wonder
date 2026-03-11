@@ -21,7 +21,10 @@ Selective OCR logic:
 """
 
 import json
+import signal
+import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -39,6 +42,25 @@ from config import config
 # Minimum character count below which a page is considered to have "no text".
 # A page with only a page number or a single word is still effectively an image page.
 TEXT_CHAR_THRESHOLD = 20
+
+
+@contextmanager
+def _suppress_signal_in_thread():
+    """Suppress 'signal only works in main thread' errors from libraries like Docling.
+
+    Some PDF processing libraries call signal.signal() for timeout protection.
+    Python forbids this in non-main threads, causing ValueError. We temporarily
+    patch signal.signal to be a no-op when running in a background thread.
+    """
+    if threading.current_thread() is threading.main_thread():
+        yield
+        return
+    original = signal.signal
+    signal.signal = lambda *a, **kw: signal.SIG_DFL
+    try:
+        yield
+    finally:
+        signal.signal = original
 
 
 @dataclass
@@ -200,7 +222,8 @@ def parse_document_with_doc(file_path: str | Path) -> tuple[list["ParsedChunk"],
     converter = DocumentConverter(
         format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
     )
-    result = converter.convert(str(file_path))
+    with _suppress_signal_in_thread():
+        result = converter.convert(str(file_path))
     doc = result.document
 
     # Re-use the existing chunk extraction logic by calling the internal helper
@@ -373,7 +396,8 @@ def parse_document(file_path: str | Path) -> list[ParsedChunk]:
         }
     )
 
-    result = converter.convert(str(file_path))
+    with _suppress_signal_in_thread():
+        result = converter.convert(str(file_path))
     doc = result.document
 
     return _extract_chunks(doc, filename, doc_type, image_only_pages)
