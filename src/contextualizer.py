@@ -39,13 +39,16 @@ Here is the chunk text:
 {chunk_text}
 </chunk>
 
-Write a single sentence (maximum 40 words) that situates this chunk in its document context.
-The sentence must state:
-1. What document this is from (use the filename as-is)
-2. What chapter/section it belongs to (use the breadcrumb)
-3. What the chunk is specifically about
+Write a single sentence (maximum 50 words) that situates this chunk so a search engine can match it to relevant queries.
 
-Be precise and technical. Do not be vague. Do not repeat the chunk text verbatim.
+Requirements:
+1. State the document filename as-is.
+2. State the section breadcrumb as-is (do NOT say "Unknown section" — infer the topic from the text).
+3. Describe what specific information this chunk contains using the KEY TERMS a user would search for.
+   For tables: describe what the table's columns and rows represent.
+   For criteria/requirements: name the type (e.g. "technical qualification criteria", "financial eligibility", "safety requirements").
+
+Be precise and technical. Use domain-specific keywords. Do not be vague.
 Output only the single sentence, nothing else.
 
 Example output:

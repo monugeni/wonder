@@ -196,18 +196,35 @@ def search(
         qmodels.Filter(must=must_conditions) if must_conditions else None
     )
 
+    # Fetch extra results so we can deduplicate and still return top_k
     results = client.query_points(
         collection_name=collection_name,
         query=query_vector,
         query_filter=query_filter,
-        limit=top_k,
+        limit=top_k * 3,
         with_payload=True,
     )
 
-    return [
-        {
+    # Deduplicate: skip chunks whose text is ≥90% identical to an already-seen chunk
+    seen_texts: list[str] = []
+    deduped: list[dict] = []
+
+    for hit in results.points:
+        text = hit.payload.get("text", "")
+        # Check for near-duplicate (simple substring overlap)
+        is_dup = False
+        for seen in seen_texts:
+            shorter, longer = (text, seen) if len(text) <= len(seen) else (seen, text)
+            if shorter and shorter in longer:
+                is_dup = True
+                break
+        if is_dup:
+            continue
+
+        seen_texts.append(text)
+        deduped.append({
             "score": round(hit.score, 4),
-            "text": hit.payload.get("text", ""),
+            "text": text,
             "context": hit.payload.get("context", ""),
             "source_file": hit.payload.get("source_file", ""),
             "doc_type": hit.payload.get("doc_type", ""),
@@ -217,9 +234,11 @@ def search(
             "table_id": hit.payload.get("table_id"),
             "chunk_id": hit.payload.get("chunk_id", ""),
             "ocr_applied": hit.payload.get("ocr_applied", False),
-        }
-        for hit in results.points
-    ]
+        })
+        if len(deduped) >= top_k:
+            break
+
+    return deduped
 
 
 def list_documents(collection_name: str) -> list[dict]:

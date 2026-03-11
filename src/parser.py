@@ -293,6 +293,16 @@ def _extract_chunks(doc, filename: str, doc_type: str, image_only_pages: set[int
             ocr_applied=chunk_ocr,
         ))
 
+    # Propagate headings: chunks with no headings inherit from the nearest
+    # preceding chunk that has headings.  This handles tables and content
+    # that Docling places between headings without attaching a breadcrumb.
+    last_headings: list[str] = []
+    for chunk in chunks:
+        if chunk.headings:
+            last_headings = chunk.headings
+        elif last_headings:
+            chunk.headings = list(last_headings)
+
     ocr_count = sum(1 for c in chunks if c.ocr_applied)
     logger.info(
         f"  Parsed {filename}: {len(chunks)} chunks "
