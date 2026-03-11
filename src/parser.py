@@ -293,15 +293,30 @@ def _extract_chunks(doc, filename: str, doc_type: str, image_only_pages: set[int
             ocr_applied=chunk_ocr,
         ))
 
-    # Propagate headings: chunks with no headings inherit from the nearest
-    # preceding chunk that has headings.  This handles tables and content
-    # that Docling places between headings without attaching a breadcrumb.
+    # Sort chunks by page order so tables (extracted first) are interleaved
+    # with text chunks at the correct position. Chunks without pages go last.
+    def _sort_key(c):
+        if c.page_numbers:
+            return (min(c.page_numbers), 0 if not c.is_table else 1)
+        return (999999, 0 if not c.is_table else 1)
+    chunks.sort(key=_sort_key)
+
+    # Forward heading propagation: chunks inherit from nearest preceding chunk
     last_headings: list[str] = []
     for chunk in chunks:
         if chunk.headings:
             last_headings = chunk.headings
         elif last_headings:
             chunk.headings = list(last_headings)
+
+    # Backward heading propagation: leading orphan chunks (e.g. tables with
+    # no page numbers placed at the end) inherit from the next chunk that has headings
+    next_headings: list[str] = []
+    for chunk in reversed(chunks):
+        if chunk.headings:
+            next_headings = chunk.headings
+        elif next_headings:
+            chunk.headings = list(next_headings)
 
     ocr_count = sum(1 for c in chunks if c.ocr_applied)
     logger.info(
